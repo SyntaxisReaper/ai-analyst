@@ -354,6 +354,9 @@ function bindEvents() {
   // New session
   document.getElementById("new-session-btn").onclick = createSession;
 
+  // Settings modal
+  bindSettingsEvents();
+
   // Clear chat history
   document.getElementById("clear-history-btn").onclick = async () => {
     const s = getActive();
@@ -408,4 +411,115 @@ function bindEvents() {
 function autoResize(el) {
   el.style.height = "auto";
   el.style.height = Math.min(el.scrollHeight, 140) + "px";
+}
+
+// ── Settings Modal ────────────────────────────────────────────────────
+let _settingsData = null;   // cached from /config
+
+async function openSettings() {
+  const modal = document.getElementById("settings-modal");
+  modal.style.display = "flex";
+
+  try {
+    _settingsData = await api("GET", "/config");
+    populateSettingsModal(_settingsData);
+  } catch {
+    showToast("Could not load settings — is backend running?", "error");
+    modal.style.display = "none";
+  }
+}
+
+function closeSettings() {
+  document.getElementById("settings-modal").style.display = "none";
+}
+
+function populateSettingsModal(data) {
+  const providerSel = document.getElementById("setting-provider");
+  const modelSel    = document.getElementById("setting-model");
+
+  // Populate providers
+  providerSel.innerHTML = "";
+  Object.keys(data.available_models).forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+    if (p === data.provider) opt.selected = true;
+    providerSel.appendChild(opt);
+  });
+
+  // Populate models for current provider
+  updateModelOptions(data.provider, data.model, data);
+
+  // Show key status for current provider
+  updateKeyStatus(data.provider, data.configured_providers);
+
+  // On provider change — refresh model list + key status
+  providerSel.onchange = () => {
+    const p = providerSel.value;
+    updateModelOptions(p, null, data);
+    updateKeyStatus(p, data.configured_providers);
+  };
+}
+
+function updateModelOptions(provider, currentModel, data) {
+  const modelSel = document.getElementById("setting-model");
+  const models = data.available_models[provider] || [];
+  modelSel.innerHTML = "";
+  models.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    if (m === currentModel) opt.selected = true;
+    modelSel.appendChild(opt);
+  });
+}
+
+function updateKeyStatus(provider, configuredProviders) {
+  const el = document.getElementById("provider-key-status");
+  const hasKey = configuredProviders.includes(provider);
+  el.className = "provider-key-status " + (hasKey ? "ok" : "missing");
+  el.textContent = hasKey
+    ? "API key configured"
+    : `No API key set — add ${provider.toUpperCase()}_API_KEY to backend/.env`;
+
+  document.getElementById("modal-save-btn").disabled = !hasKey;
+}
+
+async function saveSettings() {
+  const provider = document.getElementById("setting-provider").value;
+  const model    = document.getElementById("setting-model").value;
+  const saveBtn  = document.getElementById("modal-save-btn");
+
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Applying...";
+
+  try {
+    const res = await api("POST", "/config", { provider, model });
+    if (res.error) throw new Error(res.error);
+
+    // Update provider badge
+    document.getElementById("provider-name").textContent = res.provider.toUpperCase();
+    document.getElementById("provider-model").textContent = res.model;
+    document.getElementById("provider-dot").className = "provider-dot";
+
+    closeSettings();
+    showToast(`Switched to ${res.provider.toUpperCase()} / ${res.model}`, "success");
+  } catch (err) {
+    showToast("Failed: " + err.message, "error");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Apply";
+  }
+}
+
+// Wire up modal buttons (called after DOM ready via bindEvents)
+function bindSettingsEvents() {
+  document.getElementById("settings-btn").onclick = openSettings;
+  document.getElementById("modal-close-btn").onclick = closeSettings;
+  document.getElementById("modal-cancel-btn").onclick = closeSettings;
+  document.getElementById("modal-save-btn").onclick = saveSettings;
+  // Click overlay to close
+  document.getElementById("settings-modal").addEventListener("click", (e) => {
+    if (e.target.id === "settings-modal") closeSettings();
+  });
 }

@@ -15,9 +15,11 @@ CORS(app, origins="*")
 session_manager = SessionManager()
 data_processor = DataProcessor()
 
-# ── Config ────────────────────────────────────────────────────────────────────
-AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").lower()
-AI_MODEL = os.getenv("AI_MODEL", "")
+# ── Runtime config (mutable — can be changed via /config) ────────────────────
+_config = {
+    "provider": os.getenv("AI_PROVIDER", "groq").lower(),
+    "model": os.getenv("AI_MODEL", ""),
+}
 API_KEYS = {
     "groq": os.getenv("GROQ_API_KEY", ""),
     "openai": os.getenv("OPENAI_API_KEY", ""),
@@ -30,7 +32,8 @@ _ai_client = None
 def get_client():
     global _ai_client
     if _ai_client is None:
-        _ai_client = create_client(AI_PROVIDER, API_KEYS[AI_PROVIDER], AI_MODEL)
+        p = _config["provider"]
+        _ai_client = create_client(p, API_KEYS.get(p, ""), _config["model"])
     return _ai_client
 
 
@@ -38,15 +41,53 @@ def get_client():
 
 @app.route("/status", methods=["GET"])
 def status():
+    p = _config["provider"]
     return jsonify({
         "status": "ok",
-        "provider": AI_PROVIDER,
-        "model": AI_MODEL or "default",
-        "api_key_configured": bool(API_KEYS.get(AI_PROVIDER)),
+        "provider": p,
+        "model": _config["model"] or "default",
+        "api_key_configured": bool(API_KEYS.get(p)),
+        "configured_providers": [k for k, v in API_KEYS.items() if v],
         "active_sessions": session_manager.count(),
         "available_providers": list(PROVIDER_MODELS.keys()),
         "available_models": PROVIDER_MODELS,
     })
+
+
+@app.route("/config", methods=["GET"])
+def get_config():
+    p = _config["provider"]
+    return jsonify({
+        "provider": p,
+        "model": _config["model"],
+        "configured_providers": [k for k, v in API_KEYS.items() if v],
+        "available_models": PROVIDER_MODELS,
+    })
+
+
+@app.route("/config", methods=["POST"])
+def set_config():
+    global _ai_client
+    data = request.get_json(silent=True) or {}
+    new_provider = data.get("provider", "").lower().strip()
+    new_model = data.get("model", "").strip()
+
+    if new_provider and new_provider not in PROVIDER_MODELS:
+        return jsonify({"error": f"Unknown provider '{new_provider}'. Choose: {', '.join(PROVIDER_MODELS)}"}), 400
+
+    if new_provider and not API_KEYS.get(new_provider):
+        return jsonify({"error": f"No API key configured for '{new_provider}'. Add {new_provider.upper()}_API_KEY to backend/.env"}), 400
+
+    if new_provider:
+        _config["provider"] = new_provider
+    if new_model is not None:
+        _config["model"] = new_model
+
+    _ai_client = None  # force re-init on next request
+
+    p = _config["provider"]
+    print(f"[config] Switched to provider={p}, model={_config['model'] or 'default'}")
+    return jsonify({"success": True, "provider": p, "model": _config["model"] or "default"})
 
 
 @app.route("/session/new", methods=["POST"])
@@ -150,7 +191,8 @@ def ask():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("DEBUG", "false").lower() == "true"
+    p = _config["provider"]
     print(f"\n[*] Excel AI Agent backend  ->  http://localhost:{port}")
-    print(f"[*] Provider : {AI_PROVIDER.upper()}  |  Model: {AI_MODEL or 'default'}")
-    print(f"[*] API Key  : {'OK - set' if API_KEYS.get(AI_PROVIDER) else 'MISSING - set in .env'}\n")
+    print(f"[*] Provider : {p.upper()}  |  Model: {_config['model'] or 'default'}")
+    print(f"[*] API Key  : {'OK - set' if API_KEYS.get(p) else 'MISSING - set in .env'}\n")
     app.run(host="0.0.0.0", port=port, debug=debug)
