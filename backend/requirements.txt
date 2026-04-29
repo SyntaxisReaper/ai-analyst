@@ -1,0 +1,11 @@
+flask
+flask-cors
+pandas
+openpyxl
+xlrd
+requests
+python-dotenv
+groq
+openai
+google-genai
+numpy

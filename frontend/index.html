@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Excel AI Agent — Chat with Your Data</title>
+  <meta name="description" content="Upload any Excel or CSV file and ask questions in plain English. Powered by Groq, OpenAI, or Gemini." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ── SIDEBAR ─────────────────────────────────────────────────────── -->
+<aside class="sidebar">
+
+  <div class="sidebar-logo">
+    <div class="logo-icon">📊</div>
+    <div>
+      <h1>Excel AI Agent</h1>
+      <p>Chat with your data</p>
+    </div>
+  </div>
+
+  <!-- Provider status -->
+  <div class="provider-badge" id="provider-badge">
+    <div class="provider-dot" id="provider-dot"></div>
+    <div class="provider-info">
+      <div class="provider-name" id="provider-name">Connecting…</div>
+      <div class="provider-model" id="provider-model">—</div>
+    </div>
+  </div>
+
+  <!-- Sessions -->
+  <div class="sessions-header">
+    <span>Sessions</span>
+    <button class="btn-icon" id="new-session-btn" title="New session">＋</button>
+  </div>
+  <div class="sessions-list" id="sessions-list"></div>
+
+  <!-- Upload -->
+  <div class="upload-zone" id="upload-zone">
+    <input type="file" id="file-input" accept=".xlsx,.xls,.csv,.tsv" />
+    <div class="upload-icon">📂</div>
+    <p><strong>Click or drag</strong> a file here</p>
+    <small>.xlsx · .xls · .csv · .tsv</small>
+  </div>
+  <div class="uploading-bar" id="uploading-bar"><div class="uploading-bar-inner"></div></div>
+
+</aside>
+
+<!-- ── MAIN ────────────────────────────────────────────────────────── -->
+<main class="main">
+
+  <!-- Empty state (no active session) -->
+  <div class="empty-state" id="empty-state">
+    <div class="es-icon">🗂️</div>
+    <h3>No session selected</h3>
+    <p>Click <strong>＋</strong> in the sidebar to create a new session, then upload an Excel or CSV file to start chatting.</p>
+  </div>
+
+  <!-- Chat view (hidden until session active) -->
+  <div id="chat-view" style="display:none; flex:1; flex-direction:column; overflow:hidden;">
+    <div class="header">
+      <div class="header-file">
+        <h2 id="header-filename">No file loaded</h2>
+        <p id="header-meta"></p>
+      </div>
+      <div class="header-actions">
+        <button class="btn" id="clear-history-btn" title="Clear conversation history">🗑 Clear chat</button>
+        <button class="btn danger" id="close-session-btn" title="Close this session">✕ Close</button>
+      </div>
+    </div>
+
+    <div class="chat-area" id="chat-area">
+      <div class="chat-welcome" id="chat-welcome">
+        <h3>📊 Ready to analyse</h3>
+        <p id="welcome-msg">Upload a file to begin.</p>
+        <div class="suggestions" id="suggestions-wrap" style="display:none;">
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">What are the column names?</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Summarise the dataset</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Show the top 5 rows</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">What are the numeric stats?</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">Any missing values?</button>
+          <button class="suggestion-chip" onclick="sendSuggestion(this)">What insights can you find?</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-bar">
+      <div id="file-chip-wrap"></div>
+      <div class="input-wrap">
+        <textarea id="question-input" rows="1" placeholder="Ask anything about your data…"></textarea>
+        <button id="send-btn" title="Send">➤</button>
+      </div>
+      <div class="input-hint">Press <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for new line</div>
+    </div>
+  </div>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env_local/
+
+# ── Environment & secrets ─────────────────────────────────────────────
+# Never commit real API keys
+backend/.env
+
+# ── OS files ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor / IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+
+# ── Test / scratch files ──────────────────────────────────────────────
+test_*.py
+inspect_*.py
+test_*.csv
+test_*.xlsx
+scratch/
+
+# ── Uploaded data files (may contain private data) ───────────────────
+*.xlsx
+*.xls
+*.csv
+*.tsv
+# Allow example/sample files explicitly if needed:
+# !sample_data.csv
+
+# ── Logs ──────────────────────────────────────────────────────────────
+*.log
