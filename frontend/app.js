@@ -432,18 +432,27 @@ let _settingsData = null;   // cached from /config
 async function openSettings() {
   const modal = document.getElementById("settings-modal");
 
-  // Pre-fill backend URL from localStorage
+  // Pre-fill backend URL from localStorage — always show the modal
   const savedUrl = localStorage.getItem("AI_BACKEND_URL") || "";
   document.getElementById("setting-backend-url").value = savedUrl;
 
+  // Clear provider/model dropdowns until we know backend is reachable
+  document.getElementById("setting-provider").innerHTML = "<option>— set backend URL first —</option>";
+  document.getElementById("setting-model").innerHTML = "";
+  document.getElementById("provider-key-status").className = "provider-key-status";
+
   modal.style.display = "flex";
 
+  // Try to load live config from backend (may fail if URL not set yet)
   try {
     _settingsData = await api("GET", "/config");
     populateSettingsModal(_settingsData);
   } catch {
-    showToast("Could not load settings — is backend running?", "error");
-    modal.style.display = "none";
+    // Backend not reachable — that's OK, user just needs to set the URL first
+    document.getElementById("provider-key-status").className = "provider-key-status missing";
+    document.getElementById("provider-key-status").textContent =
+      "Enter your backend URL above and click Apply to connect.";
+    document.getElementById("provider-key-status").style.display = "block";
   }
 }
 
@@ -504,39 +513,49 @@ function updateKeyStatus(provider, configuredProviders) {
 }
 
 async function saveSettings() {
-  const provider   = document.getElementById("setting-provider").value;
-  const model      = document.getElementById("setting-model").value;
   const backendUrl = document.getElementById("setting-backend-url").value.trim().replace(/\/$/, "");
   const saveBtn    = document.getElementById("modal-save-btn");
 
-  // Save backend URL to localStorage and update live API variable
+  // Save backend URL and refresh API variable first
   if (backendUrl) {
     localStorage.setItem("AI_BACKEND_URL", backendUrl);
   } else {
     localStorage.removeItem("AI_BACKEND_URL");
   }
-  API = getApiBase();  // refresh global
+  API = getApiBase();
 
   saveBtn.disabled = true;
-  saveBtn.textContent = "Applying...";
+  saveBtn.textContent = "Connecting...";
 
+  // If dropdowns have no real selection yet (backend wasn't reachable before),
+  // just fetch config to confirm connection and populate them
   try {
-    const res = await api("POST", "/config", { provider, model });
-    if (res.error) throw new Error(res.error);
+    _settingsData = await api("GET", "/config");
+    populateSettingsModal(_settingsData);
+    saveBtn.textContent = "Apply";
+    saveBtn.disabled = false;
 
-    document.getElementById("provider-name").textContent = res.provider.toUpperCase();
-    document.getElementById("provider-model").textContent = res.model;
-    document.getElementById("provider-dot").className = "provider-dot";
+    // Now apply provider/model if user already selected them
+    const provider = document.getElementById("setting-provider").value;
+    const model    = document.getElementById("setting-model").value;
+    if (provider && !provider.includes("—")) {
+      const res = await api("POST", "/config", { provider, model });
+      if (res.error) throw new Error(res.error);
+      document.getElementById("provider-name").textContent = res.provider.toUpperCase();
+      document.getElementById("provider-model").textContent = res.model;
+      document.getElementById("provider-dot").className = "provider-dot";
+    }
 
+    checkStatus();
     closeSettings();
-    showToast(`Saved. Backend: ${API} | ${res.provider.toUpperCase()} / ${res.model}`, "success");
+    showToast(`Connected to ${API}`, "success");
   } catch (err) {
-    showToast("Failed: " + err.message, "error");
-  } finally {
+    showToast("Could not reach backend: " + err.message, "error");
     saveBtn.disabled = false;
     saveBtn.textContent = "Apply";
   }
 }
+
 
 // Wire up modal buttons (called after DOM ready via bindEvents)
 function bindSettingsEvents() {
