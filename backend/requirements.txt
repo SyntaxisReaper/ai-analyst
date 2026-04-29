@@ -10,3 +10,4 @@ openai
 google-genai
 numpy
 gunicorn
+redis>=4.5.0

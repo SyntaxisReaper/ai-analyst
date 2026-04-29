@@ -25,6 +25,18 @@ AI_MODEL=                 # leave blank for default
 GROQ_API_KEY=gsk_...      # get free key at console.groq.com
 ```
 
+### Session persistence (optional)
+
+By default the backend will persist sessions to Redis so sessions survive restarts. Configure Redis by adding these values to your `.env` (or environment):
+
+```env
+SESSION_PERSIST=true
+SESSION_REDIS_URL=redis://localhost:6379/0
+# To disable persistence set SESSION_PERSIST=false
+```
+
+If you don't want persistence, set `SESSION_PERSIST=false`. The frontend will automatically fetch the backend's base URL when served from the same host so clients connect without manual setup.
+
 | Provider | Get API Key | Default Model |
 |---|---|---|
 | **Groq** (recommended) | [console.groq.com](https://console.groq.com) | llama3-8b-8192 |

@@ -1,4 +1,5 @@
 import os
+import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -14,7 +15,10 @@ FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 CORS(app, origins="*")
 
-session_manager = SessionManager()
+# Configure session persistence via env: SESSION_PERSIST (true/false) and SESSION_DB
+_sess_persist = os.getenv("SESSION_PERSIST", "true").lower() == "true"
+_sess_redis = os.getenv("SESSION_REDIS_URL", None)
+session_manager = SessionManager(persist=_sess_persist, redis_url=_sess_redis)
 data_processor = DataProcessor()
 
 # ── Runtime config (mutable — can be changed via /config) ────────────────────
@@ -188,6 +192,25 @@ def ask():
         return jsonify({"answer": answer})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Server metadata endpoints ────────────────────────────────────────────
+@app.route("/api_base", methods=["GET"])
+def api_base():
+    # Return the base URL clients should use to contact this backend
+    base = request.host_url.rstrip("/")
+    return jsonify({"api_base": base})
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    p = _config["provider"]
+    return jsonify({
+        "status": "ok",
+        "provider": p,
+        "model": _config["model"] or "default",
+        "active_sessions": session_manager.count(),
+    })
 
 
 # ── Serve frontend ────────────────────────────────────────────────────────────

@@ -24,7 +24,24 @@ let activeId = null;      // currently selected session UUID
 let isThinking = false;
 
 // ── Init ──────────────────────────────────────────────────────────────
+async function ensureApiBase() {
+  try {
+    const res = await fetch('/api_base');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.api_base) {
+      // Persist the backend URL for all clients so they connect automatically
+      localStorage.setItem("AI_BACKEND_URL", data.api_base.replace(/\/$/, ""));
+      API = getApiBase();
+    }
+  } catch (e) {
+    // ignore — frontend may be served from a different origin
+  }
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
+  // Ensure we persist the server-provided backend URL (if backend is serving the frontend)
+  await ensureApiBase();
   loadSessions();
   checkStatus();
   bindEvents();
