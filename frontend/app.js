@@ -3,7 +3,17 @@
    All state, API calls, and DOM updates live here.
 ──────────────────────────────────────────────────────────────────── */
 
-const API = "http://localhost:5000";
+// API base URL:
+// - On Render (same origin): uses the current host automatically
+// - Local dev: falls back to localhost:5000
+const API = (() => {
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    return "http://localhost:5000";
+  }
+  // Running on a server — backend is same origin
+  return window.location.origin;
+})();
+
 
 // ── State ─────────────────────────────────────────────────────────────
 let sessions = [];        // [{ id, name, meta, msgs }]

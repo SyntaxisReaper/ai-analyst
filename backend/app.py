@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -9,7 +9,9 @@ from ai_client import create_client, PROVIDER_MODELS
 
 load_dotenv()
 
-app = Flask(__name__)
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
+app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 CORS(app, origins="*")
 
 session_manager = SessionManager()
@@ -186,6 +188,17 @@ def ask():
         return jsonify({"answer": answer})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Serve frontend ────────────────────────────────────────────────────────────
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path):
+    """Serve the frontend for any non-API route."""
+    file_path = os.path.join(FRONTEND_DIR, path)
+    if path and os.path.exists(file_path):
+        return send_from_directory(FRONTEND_DIR, path)
+    return send_from_directory(FRONTEND_DIR, "index.html")
 
 
 if __name__ == "__main__":

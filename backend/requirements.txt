@@ -9,3 +9,4 @@ groq
 openai
 google-genai
 numpy
+gunicorn
