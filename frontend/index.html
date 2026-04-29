@@ -111,6 +111,14 @@
       <button class="modal-close" id="modal-close-btn">&#x2715;</button>
     </div>
     <div class="form-group">
+      <label>Backend URL</label>
+      <input type="url" class="form-select" id="setting-backend-url"
+             placeholder="https://your-app.onrender.com" style="padding-right:12px;" />
+      <div style="font-size:11px;color:var(--text3);margin-top:5px;">
+        Leave blank if frontend and backend are on the same server
+      </div>
+    </div>
+    <div class="form-group">
       <label>AI Provider</label>
       <select class="form-select" id="setting-provider"></select>
       <div class="provider-key-status" id="provider-key-status"></div>

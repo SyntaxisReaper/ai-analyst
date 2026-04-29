@@ -3,16 +3,19 @@
    All state, API calls, and DOM updates live here.
 ──────────────────────────────────────────────────────────────────── */
 
-// API base URL:
-// - On Render (same origin): uses the current host automatically
-// - Local dev: falls back to localhost:5000
-const API = (() => {
+// API base URL — resolved in this priority order:
+// 1. User-configured URL saved in localStorage (set via Settings modal)
+// 2. localhost:5000 when running locally
+// 3. Same origin (when frontend is served by the Flask backend on Render)
+function getApiBase() {
+  const saved = localStorage.getItem("AI_BACKEND_URL");
+  if (saved) return saved.replace(/\/$/, "");  // strip trailing slash
   if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
     return "http://localhost:5000";
   }
-  // Running on a server — backend is same origin
-  return window.location.origin;
-})();
+  return window.location.origin;  // same-origin deploy (Render serving both)
+}
+let API = getApiBase();
 
 
 // ── State ─────────────────────────────────────────────────────────────
@@ -428,6 +431,11 @@ let _settingsData = null;   // cached from /config
 
 async function openSettings() {
   const modal = document.getElementById("settings-modal");
+
+  // Pre-fill backend URL from localStorage
+  const savedUrl = localStorage.getItem("AI_BACKEND_URL") || "";
+  document.getElementById("setting-backend-url").value = savedUrl;
+
   modal.style.display = "flex";
 
   try {
@@ -496,9 +504,18 @@ function updateKeyStatus(provider, configuredProviders) {
 }
 
 async function saveSettings() {
-  const provider = document.getElementById("setting-provider").value;
-  const model    = document.getElementById("setting-model").value;
-  const saveBtn  = document.getElementById("modal-save-btn");
+  const provider   = document.getElementById("setting-provider").value;
+  const model      = document.getElementById("setting-model").value;
+  const backendUrl = document.getElementById("setting-backend-url").value.trim().replace(/\/$/, "");
+  const saveBtn    = document.getElementById("modal-save-btn");
+
+  // Save backend URL to localStorage and update live API variable
+  if (backendUrl) {
+    localStorage.setItem("AI_BACKEND_URL", backendUrl);
+  } else {
+    localStorage.removeItem("AI_BACKEND_URL");
+  }
+  API = getApiBase();  // refresh global
 
   saveBtn.disabled = true;
   saveBtn.textContent = "Applying...";
@@ -507,13 +524,12 @@ async function saveSettings() {
     const res = await api("POST", "/config", { provider, model });
     if (res.error) throw new Error(res.error);
 
-    // Update provider badge
     document.getElementById("provider-name").textContent = res.provider.toUpperCase();
     document.getElementById("provider-model").textContent = res.model;
     document.getElementById("provider-dot").className = "provider-dot";
 
     closeSettings();
-    showToast(`Switched to ${res.provider.toUpperCase()} / ${res.model}`, "success");
+    showToast(`Saved. Backend: ${API} | ${res.provider.toUpperCase()} / ${res.model}`, "success");
   } catch (err) {
     showToast("Failed: " + err.message, "error");
   } finally {
