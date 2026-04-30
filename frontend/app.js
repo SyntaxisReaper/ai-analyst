@@ -104,6 +104,18 @@ window.addEventListener("DOMContentLoaded", async () => {
   checkStatus();
   bindEvents();
   await validateSessionsWithBackend();
+
+  // P1.1 — Heartbeat: ping the active session every 10 min to prevent Render cold-start
+  setInterval(() => {
+    if (activeId) {
+      fetch(`${API}/session/${activeId}/info`).catch(() => {});
+    }
+  }, 10 * 60 * 1000);
+
+  // P1.2 — Re-validate sessions when user switches back to this tab
+  window.addEventListener('focus', () => {
+    validateSessionsWithBackend().catch(() => {});
+  });
 });
 
 // ── Persist sessions to localStorage ─────────────────────────────────
@@ -243,7 +255,21 @@ async function deleteSession(id, e) {
   renderChatView();
 }
 
-// ── Render session list ───────────────────────────────────────────────
+// ── Dynamic suggestion chips (P2.2) ─────────────────────────────────
+function buildSuggestions(meta) {
+  const chips = ['Summarise the dataset', 'Show the top 5 rows', 'Any missing values?'];
+  // Add numeric-specific chips
+  const numCols = meta.stats?.numeric ? Object.keys(meta.stats.numeric) : [];
+  if (numCols.length > 0) chips.push(`What is the average ${numCols[0]}?`);
+  if (numCols.length > 1) chips.push(`What is the total ${numCols[1]}?`);
+  // Sheet-specific chip
+  if (meta.sheet_count > 1) chips.push(`Compare the ${meta.sheet_count} sheets`);
+  // Column overview
+  chips.push('What are the column names?');
+  return chips.slice(0, 6);
+}
+
+// ── Render session list (with rename on double-click, P2.3) ─────────
 function renderSessionList() {
   const list = document.getElementById("sessions-list");
   list.innerHTML = "";
@@ -252,17 +278,39 @@ function renderSessionList() {
     return;
   }
   sessions.forEach(s => {
-    const el = document.createElement("div");
-    el.className = "session-card" + (s.id === activeId ? " active" : "");
+    const el = document.createElement('div');
+    el.className = 'session-card' + (s.id === activeId ? ' active' : '');
     el.innerHTML = `
-      <span class="session-icon">${s.name ? "📊" : "🆕"}</span>
+      <span class="session-icon">${s.name ? '📊' : '🆕'}</span>
       <div class="session-meta">
-        <div class="session-name ${s.name ? "" : "empty"}">${s.name || "Empty session"}</div>
-        <div class="session-msgs">${s.msgs.length ? s.msgs.length / 2 + " exchanges" : "No messages"}</div>
+        <div class="session-name ${s.name ? '' : 'empty'}">${s.label || s.name || 'Empty session'}</div>
+        <div class="session-msgs">${s.msgs.length ? Math.floor(s.msgs.length / 2) + ' exchanges' : 'No messages'}</div>
       </div>
       <span class="session-del" title="Delete session">✕</span>`;
     el.onclick = () => switchSession(s.id);
-    el.querySelector(".session-del").onclick = (e) => deleteSession(s.id, e);
+    el.querySelector('.session-del').onclick = (e) => deleteSession(s.id, e);
+    // P2.3 — double-click the name to rename
+    el.querySelector('.session-name').ondblclick = (e) => {
+      e.stopPropagation();
+      const nameEl = e.currentTarget;
+      const oldLabel = s.label || s.name || '';
+      const inp = document.createElement('input');
+      inp.className = 'session-rename-input';
+      inp.value = oldLabel;
+      nameEl.replaceWith(inp);
+      inp.focus();
+      inp.select();
+      const commit = () => {
+        s.label = inp.value.trim() || oldLabel;
+        saveSessions();
+        renderSessionList();
+      };
+      inp.onblur = commit;
+      inp.onkeydown = (ev) => {
+        if (ev.key === 'Enter') inp.blur();
+        if (ev.key === 'Escape') { inp.value = oldLabel; inp.blur(); }
+      };
+    };
     list.appendChild(el);
   });
 }
@@ -296,16 +344,29 @@ function renderChatView() {
     ? `<div class="file-chip">📄 ${s.name}${sheetInfo}${s.meta?.is_large ? " · large file (chunked)" : ""}</div>`
     : "";
 
-  // Welcome / suggestions
-  const welcome = document.getElementById("chat-welcome");
-  const suggWrap = document.getElementById("suggestions-wrap");
+  // Welcome / suggestions — dynamic chips from file metadata (P2.2)
+  const welcome = document.getElementById('chat-welcome');
+  const suggWrap = document.getElementById('suggestions-wrap');
   if (s.msgs.length === 0) {
-    welcome.style.display = "block";
-    document.getElementById("welcome-msg").textContent =
-      s.name ? `Ask anything about ${s.name}` : "Upload a file on the left to begin.";
-    suggWrap.style.display = s.name ? "flex" : "none";
+    welcome.style.display = 'block';
+    document.getElementById('welcome-msg').textContent =
+      s.name ? `Ask anything about ${s.name}` : 'Upload a file on the left to begin.';
+    if (s.name && s.meta) {
+      suggWrap.style.display = 'flex';
+      suggWrap.innerHTML = '';
+      const chips = buildSuggestions(s.meta);
+      chips.forEach(txt => {
+        const btn = document.createElement('button');
+        btn.className = 'suggestion-chip';
+        btn.textContent = txt;
+        btn.onclick = () => sendSuggestion(btn);
+        suggWrap.appendChild(btn);
+      });
+    } else {
+      suggWrap.style.display = 'none';
+    }
   } else {
-    welcome.style.display = "none";
+    welcome.style.display = 'none';
   }
 
   // Re-render messages (keep existing bubbles to avoid flicker)
@@ -359,7 +420,14 @@ async function uploadFile(file) {
     renderChatView();
     showToast(`✓ ${data.file_name} loaded (${data.metadata.rows?.toLocaleString()} rows)`, "success");
   } catch (err) {
-    showToast("Upload failed: " + err.message, "error");
+    // P1.3 — Auto-recover if the session expired while the page was open
+    if (err.message && err.message.includes('Invalid or missing session_id')) {
+      console.warn('[uploadFile] Stale session on upload, recovering...');
+      await recoverStaleSession();
+      showToast('Session refreshed — please try uploading again.', 'error');
+    } else {
+      showToast('Upload failed: ' + err.message, 'error');
+    }
   } finally {
     bar.classList.remove("active");
     zone.style.pointerEvents = "";
@@ -536,13 +604,20 @@ async function runCommand(command, sessionId, btn) {
   }
 }
 
-// ── Toast ─────────────────────────────────────────────────────────────
-function showToast(msg, type = "info") {
-  const t = document.createElement("div");
+// ── Toast (stacked) ──────────────────────────────────────────────────
+let _toastOffset = 0;
+function showToast(msg, type = 'info') {
+  const t = document.createElement('div');
   t.className = `toast ${type}`;
   t.textContent = msg;
+  // Stack toasts vertically above each other
+  _toastOffset += 1;
+  t.style.bottom = (24 + (_toastOffset - 1) * 56) + 'px';
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 3500);
+  setTimeout(() => {
+    t.remove();
+    _toastOffset = Math.max(0, _toastOffset - 1);
+  }, 3500);
 }
 
 // ── Bind events ───────────────────────────────────────────────────────
@@ -570,6 +645,17 @@ function bindEvents() {
   document.getElementById("close-session-btn").onclick = () => {
     if (activeId) deleteSession(activeId);
   };
+
+  // Stats panel (P3.4)
+  document.getElementById("stats-panel-btn").onclick = openStatsPanel;
+  document.getElementById("stats-modal-close").onclick = () => {
+    document.getElementById("stats-modal").style.display = "none";
+  };
+  document.getElementById("stats-modal").addEventListener("click", (e) => {
+    if (e.target.id === "stats-modal") document.getElementById("stats-modal").style.display = "none";
+  });
+  // Filter download (P3.1)
+  document.getElementById("filter-download-btn").onclick = downloadFilteredCSV;
 
   // Send button
   document.getElementById("send-btn").onclick = () => {
@@ -600,6 +686,44 @@ function bindEvents() {
     zone.classList.remove("drag-over");
     const f = e.dataTransfer.files[0];
     if (f) uploadFile(f);
+  });
+
+  // Quick Win C — Ctrl+K focuses the input
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault();
+      document.getElementById('question-input').focus();
+    }
+  });
+
+  // Scroll-to-bottom button (P2.4)
+  const chatArea = document.getElementById('chat-area');
+  const scrollBtn = document.getElementById('scroll-bottom-btn');
+  chatArea.addEventListener('scroll', () => {
+    const distFromBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+    scrollBtn.classList.toggle('visible', distFromBottom > 200);
+  });
+  scrollBtn.onclick = () => { chatArea.scrollTop = chatArea.scrollHeight; };
+
+  // Quick Win F — Theme toggle (both mobile + desktop buttons)
+  const applyTheme = (theme) => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+    const icon = theme === 'dark' ? '☀️' : '🌙';
+    document.querySelectorAll('#theme-toggle-btn, #theme-toggle-btn-desktop').forEach(b => { if (b) b.textContent = icon; });
+  };
+  const savedTheme = localStorage.getItem('theme') || 'dark';
+  applyTheme(savedTheme);
+  document.querySelectorAll('#theme-toggle-btn, #theme-toggle-btn-desktop').forEach(btn => {
+    if (btn) btn.onclick = () => {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      applyTheme(current === 'dark' ? 'light' : 'dark');
+    };
+  });
+
+  // Sidebar toggle (mobile, P2.5)
+  document.getElementById('sidebar-toggle-btn')?.addEventListener('click', () => {
+    document.querySelector('.sidebar').classList.toggle('open');
   });
 }
 
@@ -750,4 +874,142 @@ function bindSettingsEvents() {
   document.getElementById("settings-modal").addEventListener("click", (e) => {
     if (e.target.id === "settings-modal") closeSettings();
   });
+}
+
+// ── P3.4 + P3.2 + P3.3: Stats Panel ─────────────────────────────────
+let _chartInstances = [];
+
+async function openStatsPanel() {
+  const s = getActive();
+  if (!s || !s.meta) return showToast('Upload a file first!', 'error');
+  document.getElementById('stats-modal').style.display = 'flex';
+
+  // P3.3 — Sheet selector
+  const sheetWrap = document.getElementById('sheet-selector-wrap');
+  const sheetSel = document.getElementById('sheet-selector');
+  if (s.meta.sheet_count > 1 && s.meta.sheets) {
+    sheetWrap.style.display = 'block';
+    sheetSel.innerHTML = '';
+    s.meta.sheets.forEach(sh => {
+      const opt = document.createElement('option');
+      opt.value = sh; opt.textContent = sh;
+      sheetSel.appendChild(opt);
+    });
+    sheetSel.onchange = () => renderStats(s.meta);
+  } else {
+    sheetWrap.style.display = 'none';
+  }
+  renderStats(s.meta);
+}
+
+function renderStats(meta) {
+  // Destroy previous Chart.js instances
+  _chartInstances.forEach(c => c.destroy());
+  _chartInstances = [];
+
+  const body = document.getElementById('stats-panel-body');
+  const stats = meta.stats || {};
+  const numeric = stats.numeric || {};
+  const categorical = stats.categorical || {};
+  let html = '';
+
+  // Numeric columns table
+  const numKeys = Object.keys(numeric);
+  if (numKeys.length) {
+    html += `<h4 style="font-size:13px;font-weight:600;color:var(--text2);margin:16px 0 10px;">Numeric Columns</h4>
+    <table class="stats-table">
+      <thead><tr><th>Column</th><th>Count</th><th>Min</th><th>Max</th><th>Mean</th><th>Sum</th></tr></thead><tbody>`;
+    numKeys.forEach(col => {
+      const s = numeric[col];
+      html += `<tr>
+        <td><strong>${col}</strong></td>
+        <td>${(s.count||0).toLocaleString()}</td>
+        <td>${(s.min??'—')}</td>
+        <td>${(s.max??'—')}</td>
+        <td>${typeof s.mean === 'number' ? s.mean.toFixed(2) : '—'}</td>
+        <td>${typeof s.sum === 'number' ? s.sum.toLocaleString() : '—'}</td>
+      </tr>`;
+    });
+    html += `</tbody></table>`;
+    // P3.2 — bar chart of means
+    html += `<canvas id="chart-numeric" height="90" style="margin:14px 0;"></canvas>`;
+  }
+
+  // Categorical columns
+  const catKeys = Object.keys(categorical);
+  if (catKeys.length) {
+    html += `<h4 style="font-size:13px;font-weight:600;color:var(--text2);margin:16px 0 10px;">Categorical Columns</h4>`;
+    catKeys.forEach(col => {
+      const cs = categorical[col];
+      html += `<div style="margin-bottom:12px;">
+        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">${col} <span style="color:var(--text3);font-weight:400;">(${(cs.unique||0).toLocaleString()} unique)</span></div>
+        <canvas id="chart-cat-${col.replace(/\W/g,'_')}" height="70"></canvas>
+      </div>`;
+    });
+  }
+
+  body.innerHTML = html;
+
+  // Render numeric means chart
+  if (numKeys.length && document.getElementById('chart-numeric')) {
+    _chartInstances.push(new Chart(document.getElementById('chart-numeric'), {
+      type: 'bar',
+      data: {
+        labels: numKeys,
+        datasets: [{ label: 'Mean', data: numKeys.map(k => numeric[k].mean ?? 0),
+          backgroundColor: 'rgba(124,110,247,0.7)', borderRadius: 5 }]
+      },
+      options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b92b0' } }, y: { ticks: { color: '#8b92b0' } } } }
+    }));
+  }
+
+  // Render categorical top-value charts
+  catKeys.forEach(col => {
+    const cs = categorical[col];
+    const canvasId = `chart-cat-${col.replace(/\W/g,'_')}`;
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !cs.top) return;
+    const labels = cs.top.map(([v]) => v);
+    const data   = cs.top.map(([,c]) => c);
+    _chartInstances.push(new Chart(canvas, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: col, data, backgroundColor: 'rgba(93,184,245,0.7)', borderRadius: 4 }] },
+      options: { indexAxis: 'y', plugins: { legend: { display: false } },
+        scales: { x: { ticks: { color: '#8b92b0' } }, y: { ticks: { color: '#8b92b0', font: { size: 10 } } } } }
+    }));
+  });
+}
+
+// ── P3.1: Filter and download CSV ─────────────────────────────────────
+async function downloadFilteredCSV() {
+  const s = getActive();
+  if (!s) return;
+  const query = document.getElementById('filter-query-input').value.trim();
+  const btn = document.getElementById('filter-download-btn');
+  btn.disabled = true;
+  btn.textContent = 'Preparing…';
+  try {
+    const res = await fetch(`${API}/filter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: s.id, query }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+      throw new Error(err.error || 'Filter failed');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `filtered_${s.name || 'data'}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('✓ CSV downloaded', 'success');
+  } catch (err) {
+    showToast('Download failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬇ Download CSV';
+  }
 }

@@ -10,6 +10,17 @@ class DataProcessor:
     LARGE_THRESHOLD = 20_000
     MAX_CAT_VALUES = 10
     MAX_SAMPLE_ROWS = 10
+    _cache: Dict[str, Any] = {}   # P4.1 — in-memory hash cache
+
+    def process_cached(self, file_bytes: bytes, filename: str, file_hash: str) -> Dict[str, Any]:
+        """Return cached result if the same file was processed before (P4.1)."""
+        if file_hash in self._cache:
+            import logging
+            logging.getLogger("data_processor").info("Cache hit for hash %s", file_hash[:12])
+            return self._cache[file_hash]
+        result = self.process(file_bytes, filename)
+        self._cache[file_hash] = result
+        return result
 
     def process(self, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         ext = os.path.splitext(filename)[1].lower()
@@ -124,7 +135,13 @@ class DataProcessor:
         stats = self._compute_stats(df)
         meta["stats"] = stats
         summary = self._build_summary(df, filename)
-        return {"summary": summary, "metadata": meta}
+        # P3.1 — serialise DataFrame for /filter endpoint (cap at 50k rows to keep memory sane)
+        df_for_filter = df.head(50_000)
+        try:
+            dataframe_json = df_for_filter.to_json(orient="split", date_format="iso", default_handler=str)
+        except Exception:
+            dataframe_json = None
+        return {"summary": summary, "metadata": meta, "dataframe_json": dataframe_json}
 
     def _compute_stats(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Return structured statistics for numeric, categorical and datetime columns.

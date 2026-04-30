@@ -1,23 +1,42 @@
 import os
+import re
+import hashlib
 import logging
+import difflib
+from typing import Optional, Tuple
 from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 
 from session_manager import SessionManager
 from data_processor import DataProcessor
 from ai_client import create_client, PROVIDER_MODELS
-import re
 
 load_dotenv()
 
+# ── Logging (P5) ─────────────────────────────────────────────────────────────────
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("app")
+
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
-import re
-import difflib
-from typing import Optional, Tuple
 
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 CORS(app, origins="*")
+
+# ── Rate limiting (P4.3) ────────────────────────────────────────────────────
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 # Configure session persistence via env: SESSION_PERSIST (true/false) and SESSION_DB
 _sess_persist = os.getenv("SESSION_PERSIST", "true").lower() == "true"
@@ -157,18 +176,69 @@ def upload():
         return jsonify({"error": f"Unsupported type '{ext}'. Use .xlsx, .xls, .csv, or .tsv"}), 400
 
     try:
-        result = data_processor.process(f.read(), f.filename)
+        file_bytes = f.read()
+        # P4.1 — file hash caching: skip re-processing identical files
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        result = data_processor.process_cached(file_bytes, f.filename, file_hash)
         session_manager.set_file(sid, {
             "file_name": f.filename,
             "summary": result["summary"],
             "metadata": result["metadata"],
+            "dataframe_json": result.get("dataframe_json"),  # P3.1
         })
+        log.info("Upload OK sid=%s file=%s rows=%s", sid, f.filename, result["metadata"].get("rows"))
         return jsonify({"success": True, "file_name": f.filename, "metadata": result["metadata"]})
     except Exception as e:
+        log.exception("Upload failed sid=%s", sid)
         return jsonify({"error": str(e)}), 500
 
 
+# ── P3.1: Filter rows and return CSV ──────────────────────────────────────
+@app.route("/filter", methods=["POST"])
+def filter_data():
+    import pandas as pd
+    import io as _io
+    data = request.get_json(silent=True) or {}
+    sid = data.get("session_id")
+    query = data.get("query", "").strip()
+    if not sid or not session_manager.exists(sid):
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    s = session_manager.get(sid)
+    df_json = s.get("dataframe_json")
+    if not df_json:
+        return jsonify({"error": "No DataFrame available. Re-upload the file."}), 400
+    try:
+        df = pd.read_json(_io.StringIO(df_json), orient="split")
+        if query:
+            df = df.query(query)
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        return Response(
+            csv_bytes,
+            mimetype="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="filtered_{s.get("file_name", "data.csv")}"'},
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ── P3.2: Chart data ─────────────────────────────────────────────────────────
+@app.route("/chart_data", methods=["POST"])
+def chart_data():
+    data = request.get_json(silent=True) or {}
+    sid = data.get("session_id")
+    if not sid or not session_manager.exists(sid):
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    s = session_manager.get(sid)
+    meta = s.get("metadata", {})
+    stats = meta.get("stats", {})
+    # Return pre-computed numeric stats suitable for charting
+    numeric = stats.get("numeric", {})
+    categorical = stats.get("categorical", {})
+    return jsonify({"numeric": numeric, "categorical": categorical, "columns": meta.get("column_names", [])})
+
+
 @app.route("/ask", methods=["POST"])
+@limiter.limit("30 per minute")
 def ask():
     data = request.get_json(silent=True) or {}
     sid = data.get("session_id")

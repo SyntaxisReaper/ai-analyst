@@ -1,15 +1,26 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Excel AI Agent — Chat with Your Data</title>
   <meta name="description" content="Upload any Excel or CSV file and ask questions in plain English. Powered by Groq, OpenAI, or Gemini." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+
+<!-- ── MOBILE TOPBAR ──────────────────────────────────────────────── -->
+<div class="mobile-topbar">
+  <button class="btn-icon" id="sidebar-toggle-btn" title="Toggle sidebar">☰</button>
+  <span class="mobile-title">📊 Excel AI Agent</span>
+  <button class="btn-icon" id="theme-toggle-btn" title="Toggle theme">☀️</button>
+</div>
+
+<!-- ── APP SHELL ─────────────────────────────────────────────────── -->
+<div class="app-shell">
 
 <!-- ── SIDEBAR ─────────────────────────────────────────────────────── -->
 <aside class="sidebar">
@@ -20,6 +31,7 @@
       <h1>Excel AI Agent</h1>
       <p>Chat with your data</p>
     </div>
+    <button class="btn-icon sidebar-theme-btn" id="theme-toggle-btn-desktop" title="Toggle theme" style="margin-left:auto;">☀️</button>
   </div>
 
   <!-- Provider status -->
@@ -68,39 +80,39 @@
         <p id="header-meta"></p>
       </div>
       <div class="header-actions">
+        <button class="btn" id="stats-panel-btn" title="View column statistics">📈 Stats</button>
         <button class="btn" id="clear-history-btn" title="Clear conversation history">🗑 Clear chat</button>
         <button class="btn danger" id="close-session-btn" title="Close this session">✕ Close</button>
       </div>
     </div>
 
     <div class="chat-area" id="chat-area">
+      <!-- Scroll-to-bottom button (P2.4) -->
+      <button class="scroll-bottom-btn" id="scroll-bottom-btn" title="Jump to bottom">↓</button>
+
       <div class="chat-welcome" id="chat-welcome">
         <h3>📊 Ready to analyse</h3>
         <p id="welcome-msg">Upload a file to begin.</p>
-        <div class="suggestions" id="suggestions-wrap" style="display:none;">
-          <button class="suggestion-chip" onclick="sendSuggestion(this)">What are the column names?</button>
-          <button class="suggestion-chip" onclick="sendSuggestion(this)">Summarise the dataset</button>
-          <button class="suggestion-chip" onclick="sendSuggestion(this)">Show the top 5 rows</button>
-          <button class="suggestion-chip" onclick="sendSuggestion(this)">What are the numeric stats?</button>
-          <button class="suggestion-chip" onclick="sendSuggestion(this)">Any missing values?</button>
-          <button class="suggestion-chip" onclick="sendSuggestion(this)">What insights can you find?</button>
-        </div>
+        <div class="suggestions" id="suggestions-wrap" style="display:none;"></div>
       </div>
     </div>
 
     <div class="input-bar">
       <div id="file-chip-wrap"></div>
       <div class="input-wrap">
-        <textarea id="question-input" rows="1" placeholder="Ask anything about your data…"></textarea>
+        <textarea id="question-input" rows="1" placeholder="Ask anything about your data… (Ctrl+K)"></textarea>
         <button id="send-btn" title="Send">➤</button>
       </div>
-      <div class="input-hint">Press <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for new line</div>
+      <div class="input-hint">Press <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for new line · <strong>Ctrl+K</strong> to focus</div>
     </div>
   </div>
 
 </main>
 
+</div><!-- /.app-shell -->
+
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
   // Attempt to load backend config if on same origin; ignore 404 if on different origin (e.g., Vercel)
   var configScript = document.createElement('script');
@@ -138,6 +150,29 @@
       <button class="btn" id="modal-cancel-btn">Cancel</button>
       <button class="btn-primary" id="modal-save-btn">Apply</button>
     </div>
+  </div>
+</div>
+
+<!-- Stats Panel Modal (P3.4 + P3.2) -->
+<div class="modal-overlay" id="stats-modal" style="display:none;">
+  <div class="modal" style="width:640px;max-height:80vh;overflow-y:auto;">
+    <div class="modal-header">
+      <h3>📈 Column Statistics</h3>
+      <button class="modal-close" id="stats-modal-close">&#x2715;</button>
+    </div>
+    <!-- Sheet selector (P3.3) -->
+    <div id="sheet-selector-wrap" style="display:none;margin-bottom:16px;">
+      <label class="form-group" style="margin:0;">
+        <span style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.7px;">Sheet</span>
+        <select class="form-select" id="sheet-selector" style="margin-top:6px;"></select>
+      </label>
+    </div>
+    <!-- Filter / download (P3.1) -->
+    <div class="stats-filter-bar">
+      <input id="filter-query-input" class="form-select" placeholder='pandas query e.g. Sales > 1000 and Country == "US"' style="flex:1;" />
+      <button class="btn-primary" id="filter-download-btn" style="white-space:nowrap;padding:9px 16px;">⬇ Download CSV</button>
+    </div>
+    <div id="stats-panel-body"></div>
   </div>
 </div>
 
