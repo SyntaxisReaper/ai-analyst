@@ -7,13 +7,21 @@
 // 1. User-configured URL saved in localStorage (set via Settings modal)
 // 2. localhost:5000 when running locally
 // 3. Same origin (when frontend is served by the Flask backend on Render)
+// Default backend (fallback when frontend is hosted separately)
+const DEFAULT_BACKEND = "https://ai-analyst-yhex.onrender.com";
+
 function getApiBase() {
-  const saved = localStorage.getItem("AI_BACKEND_URL");
+  // 1. Server-injected global (served from /config.js)
+  const injected = (typeof window !== "undefined" && window.AI_BACKEND_URL) ? window.AI_BACKEND_URL : null;
+  // 2. User-configured URL saved in localStorage (set via Settings modal)
+  const saved = localStorage.getItem("AI_BACKEND_URL") || injected;
   if (saved) return saved.replace(/\/$/, "");  // strip trailing slash
+  // 3. Local development
   if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
     return "http://localhost:5000";
   }
-  return window.location.origin;  // same-origin deploy (Render serving both)
+  // 4. Fallback to a known backend if the frontend is hosted elsewhere (like Vercel).
+  return DEFAULT_BACKEND;
 }
 let API = getApiBase();
 
