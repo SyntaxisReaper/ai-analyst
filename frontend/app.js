@@ -316,9 +316,23 @@ async function sendQuestion(question) {
     typing.remove();
     if (res.error) throw new Error(res.error);
 
-    s.msgs.push({ role: "assistant", content: res.answer });
+    const assistantContent = (res.structured && res.structured.content) ? res.structured.content : res.answer;
+    const command = (res.structured && res.structured.command) ? res.structured.command : null;
+
+    s.msgs.push({ role: "assistant", content: assistantContent, command });
     saveSessions();
-    appendBubble("assistant", res.answer);
+    const msgEl = appendBubble("assistant", assistantContent);
+    if (command) {
+      // add a command action button to the assistant message
+      const actionsWrap = document.createElement('div');
+      actionsWrap.style.marginTop = '8px';
+      const btn = document.createElement('button');
+      btn.className = 'msg-action-btn';
+      btn.textContent = `Run: ${command.name}`;
+      btn.onclick = () => runCommand(command, s.id, btn);
+      actionsWrap.appendChild(btn);
+      msgEl.querySelector('.msg-bubble').appendChild(actionsWrap);
+    }
     renderSessionList();
   } catch (err) {
     typing.remove();
@@ -343,7 +357,15 @@ function appendBubble(role, content, scroll = true) {
   msg.className = `message ${role}`;
 
   const avatar = `<div class="msg-avatar">${isUser ? "👤" : "🤖"}</div>`;
-  const html = marked.parse(content);
+  const isUser = role === "user";
+
+  // support content objects or plain strings; if object, prefer its `content` prop
+  let contentText = content;
+  if (typeof content === 'object' && content !== null) {
+    contentText = content.content || JSON.stringify(content);
+  }
+
+  const html = marked.parse(contentText);
   const actions = isUser ? "" : `
     <div class="msg-actions">
       <button class="msg-action-btn" onclick="copyMsg(this)" data-text="${escapeAttr(content)}">📋 Copy</button>
@@ -361,9 +383,9 @@ function appendBubble(role, content, scroll = true) {
     const [av, body] = msg.children;
     msg.appendChild(av);
   }
-
   area.appendChild(msg);
   if (scroll) area.scrollTop = area.scrollHeight;
+  return msg;
 }
 
 function escapeAttr(s) {
@@ -376,6 +398,27 @@ function copyMsg(btn) {
     btn.textContent = "✓ Copied";
     setTimeout(() => (btn.textContent = "📋 Copy"), 1800);
   });
+}
+
+// Execute a structured command by calling the backend `/execute_command` endpoint
+async function runCommand(command, sessionId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+  try {
+    const res = await api('POST', '/execute_command', { session_id: sessionId, command });
+    if (res.error) throw new Error(res.error || 'Command failed');
+    // Show result in the chat as an assistant message
+    const s = getActive();
+    const out = typeof res.result !== 'undefined' ? JSON.stringify(res.result, null, 2) : JSON.stringify(res);
+    s.msgs.push({ role: 'assistant', content: `Command result:\n\n${out}` });
+    saveSessions();
+    appendBubble('assistant', `Command result:\n\n${out}`);
+  } catch (err) {
+    appendBubble('assistant', `⚠️ Error running command: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = `Run: ${command.name}`;
+  }
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────
