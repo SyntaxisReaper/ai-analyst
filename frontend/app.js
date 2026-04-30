@@ -366,6 +366,23 @@ async function uploadFile(file) {
   }
 }
 
+// ── Stale session recovery ───────────────────────────────────────────
+// Called when the backend says the session doesn't exist (e.g. after a
+// Render cold-start wipes in-memory sessions). Drops the dead session,
+// creates a fresh one, and asks the user to re-upload their file.
+async function recoverStaleSession() {
+  const deadId = activeId;
+  // Remove dead session from local state
+  sessions = sessions.filter(s => s.id !== deadId);
+  saveSessions();
+  try {
+    await createSession(); // creates + switches to a new session
+    showToast('⚠️ Session expired (backend restarted). Please re-upload your file.', 'error');
+  } catch {
+    showToast('Backend unreachable. Please refresh the page.', 'error');
+  }
+}
+
 // ── Send question ─────────────────────────────────────────────────────
 async function sendQuestion(question) {
   const s = getActive();
@@ -422,14 +439,18 @@ async function sendQuestion(question) {
     renderSessionList();
   } catch (err) {
     typing.remove();
-    // Show a user-friendly error message; avoid showing cryptic system errors
-    let errMsg = err.message || 'Unknown error';
-    // Clean up technical error messages
-    if (errMsg.includes('JSON') || errMsg.includes('undefined') || errMsg.includes('null')) {
-      errMsg = 'Backend error or invalid response. Please try again.';
+    const errMsg = err.message || 'Unknown error';
+    // Auto-recover stale sessions (backend restarted and wiped in-memory sessions)
+    if (errMsg.includes('Invalid or missing session_id')) {
+      console.warn('[sendQuestion] Stale session detected, recovering...');
+      await recoverStaleSession();
+    } else {
+      const displayMsg = (errMsg.includes('JSON') || errMsg.includes('undefined') || errMsg.includes('null'))
+        ? 'Backend error or invalid response. Please try again.'
+        : errMsg;
+      appendBubble('assistant', '⚠️ **Error:** ' + displayMsg);
+      console.error('[sendQuestion] Error:', err);
     }
-    appendBubble("assistant", "⚠️ **Error:** " + errMsg);
-    console.error('[sendQuestion] Error:', err);
   } finally {
     isThinking = false;
     document.getElementById("send-btn").disabled = false;
