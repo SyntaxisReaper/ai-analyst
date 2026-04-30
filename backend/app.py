@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from session_manager import SessionManager
 from data_processor import DataProcessor
 from ai_client import create_client, PROVIDER_MODELS
+import re
 
 load_dotenv()
 
@@ -181,17 +182,73 @@ def ask():
         return jsonify({"error": "Question cannot be empty"}), 400
 
     try:
+        # First: attempt to answer simple numeric/aggregation questions from pre-computed stats
+        server_answer = None
+        try:
+            server_answer = try_answer_from_stats(s, question)
+        except Exception:
+            server_answer = None
+
+        if server_answer is not None:
+            session_manager.add_message(sid, "user", question)
+            session_manager.add_message(sid, "assistant", server_answer)
+            return jsonify({"answer": server_answer, "source": "server"})
+
+        # Fallback: call the AI client
         client = get_client()
         answer = client.chat(
             summary=s["summary"],
             history=s["history"],
             question=question,
         )
+        # Try to parse structured JSON output (command protocol) from the assistant
+        structured = None
+        try:
+            import json as _json
+            parsed = _json.loads(answer)
+            # basic validation
+            if isinstance(parsed, dict) and parsed.get("type") in ("answer", "command"):
+                structured = parsed
+        except Exception:
+            structured = None
         session_manager.add_message(sid, "user", question)
         session_manager.add_message(sid, "assistant", answer)
-        return jsonify({"answer": answer})
+        resp = {"answer": answer, "source": "model"}
+        if structured:
+            resp["structured"] = structured
+        return jsonify(resp)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/execute_command", methods=["POST"])
+def execute_command():
+    data = request.get_json(silent=True) or {}
+    sid = data.get("session_id")
+    cmd = data.get("command")
+    if not sid or not session_manager.exists(sid):
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    if not isinstance(cmd, dict) or not cmd.get("name"):
+        return jsonify({"error": "Invalid command payload"}), 400
+
+    # Basic built-in command handlers
+    name = cmd["name"]
+    args = cmd.get("args") or {}
+    s = session_manager.get(sid)
+
+    # Example: show_columns → return column names from session metadata
+    if name == "show_columns":
+        cols = s.get("metadata", {}).get("column_names")
+        return jsonify({"ok": True, "result": cols})
+
+    # Example: export_sample_csv → attempt to return first N sample rows from metadata 'sample' if present
+    if name == "export_sample_csv":
+        rows = int(args.get("rows", 10))
+        # We don't store raw file bytes in this implementation; return an informative error if not available
+        return jsonify({"ok": False, "error": "Export not implemented on server; please request a download in the UI"})
+
+    # Default: echo back the command (safe fallback)
+    return jsonify({"ok": True, "result": {"echo": cmd}})
 
 
 # ── Server metadata endpoints ────────────────────────────────────────────
@@ -237,6 +294,70 @@ def serve_frontend(path):
     if path and os.path.exists(file_path):
         return send_from_directory(FRONTEND_DIR, path)
     return send_from_directory(FRONTEND_DIR, "index.html")
+
+
+def try_answer_from_stats(session: dict, question: str):
+    """Attempt to answer basic aggregation questions from stored stats.
+
+    Returns a plain-text answer string when applicable, otherwise None.
+    This handles simple patterns like 'sum of X', 'average of X', 'min X', 'max X',
+    'how many X', 'count X', 'median of X'.
+    """
+    q = question.lower()
+    stats = session.get("metadata", {}).get("stats") or {}
+    if not stats:
+        return None
+
+    # find candidate column by matching column names in question
+    cols = []
+    col_names = session.get("metadata", {}).get("column_names") or []
+    # normalize col names list
+    if isinstance(col_names, dict):
+        # excel sheets -> dict of sheet -> cols; flatten
+        all_cols = []
+        for v in col_names.values():
+            all_cols.extend(v)
+        col_names = all_cols
+
+    for c in col_names:
+        if not c:
+            continue
+        if c.lower() in q:
+            cols.append(c)
+
+    # if multiple columns mentioned, pick first
+    col = cols[0] if cols else None
+    # ops
+    if not col:
+        return None
+
+    numeric = stats.get("numeric", {})
+    col_stats = numeric.get(col) if isinstance(numeric, dict) else None
+    if not col_stats:
+        # maybe large-file numeric stats stored top-level under numeric
+        col_stats = None
+
+    # mapping of keywords to stat keys
+    if "sum" in q or "total" in q:
+        if col_stats and "sum" in col_stats:
+            return f"Sum of {col}: {col_stats['sum']:,}"
+    if "average" in q or "mean" in q:
+        if col_stats and "mean" in col_stats:
+            return f"Average of {col}: {col_stats['mean']:,}"
+    if "median" in q:
+        if col_stats and "median" in col_stats:
+            return f"Median of {col}: {col_stats['median']:,}"
+    if "min" in q or "minimum" in q:
+        if col_stats and "min" in col_stats:
+            return f"Min of {col}: {col_stats['min']:,}"
+    if "max" in q or "maximum" in q:
+        if col_stats and "max" in col_stats:
+            return f"Max of {col}: {col_stats['max']:,}"
+    if "count" in q or "how many" in q or "number of" in q:
+        if col_stats and "count" in col_stats:
+            return f"Count (non-missing) of {col}: {col_stats['count']:,}"
+
+    return None
 
 
 if __name__ == "__main__":

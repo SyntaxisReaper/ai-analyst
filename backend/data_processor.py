@@ -121,8 +121,60 @@ class DataProcessor:
         df = self._clean(df)
         meta = {"file_name": filename, "rows": len(df), "columns": len(df.columns),
                 "column_names": df.columns.tolist(), "is_large": False}
+        stats = self._compute_stats(df)
+        meta["stats"] = stats
         summary = self._build_summary(df, filename)
         return {"summary": summary, "metadata": meta}
+
+    def _compute_stats(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Return structured statistics for numeric, categorical and datetime columns.
+
+        Numeric stats: count, sum, mean, median, std, min, max, 25pct,75pct
+        Categorical stats: unique, top (list of (value,count))
+        Datetime stats: min, max, count
+        Also include up to MAX_SAMPLE_ROWS sample rows as list of dicts.
+        """
+        stats: Dict[str, Any] = {}
+        num_cols = df.select_dtypes(include=[np.number]).columns
+        if len(num_cols):
+            num_stats = {}
+            for col in num_cols:
+                s = df[col].dropna()
+                if len(s) == 0:
+                    continue
+                num_stats[col] = {
+                    "count": int(s.count()),
+                    "sum": float(s.sum()),
+                    "mean": float(s.mean()),
+                    "median": float(s.median()),
+                    "std": float(s.std()),
+                    "min": float(s.min()),
+                    "max": float(s.max()),
+                    "25pct": float(s.quantile(0.25)),
+                    "75pct": float(s.quantile(0.75)),
+                }
+            stats["numeric"] = num_stats
+
+        cat_cols = df.select_dtypes(include=[object, "category"]).columns
+        if len(cat_cols):
+            cat_stats = {}
+            for col in cat_cols:
+                top = df[col].value_counts().head(self.MAX_CAT_VALUES)
+                top_list = [(str(v), int(c)) for v, c in top.items()]
+                cat_stats[col] = {"unique": int(df[col].nunique()), "missing": int(df[col].isna().sum()), "top": top_list}
+            stats["categorical"] = cat_stats
+
+        dt_cols = df.select_dtypes(include=["datetime64"]).columns
+        if len(dt_cols):
+            dt_stats = {}
+            for col in dt_cols:
+                s = df[col].dropna()
+                dt_stats[col] = {"min": str(s.min()), "max": str(s.max()), "count": int(len(s))}
+            stats["datetime"] = dt_stats
+
+        # sample rows
+        stats["samples"] = df.head(self.MAX_SAMPLE_ROWS).to_dict(orient="records")
+        return stats
 
     def _build_summary(self, df: pd.DataFrame, filename: str) -> str:
         lines = [f"=== DATASET: {filename} ===",
@@ -240,5 +292,7 @@ class DataProcessor:
                 lines.append(f"Row {i + 1}: {row}")
 
         meta = {"file_name": filename, "rows": total_rows, "columns": len(columns),
-                "column_names": columns, "is_large": True}
+            "column_names": columns, "is_large": True}
+        # attach computed stats
+        meta["stats"] = {"numeric": num_stats, "categorical": cat_stats}
         return {"summary": "\n".join(lines), "metadata": meta}
