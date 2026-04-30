@@ -12,6 +12,9 @@ import re
 load_dotenv()
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+import re
+import difflib
+from typing import Optional, Tuple
 
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 CORS(app, origins="*")
@@ -303,7 +306,7 @@ def try_answer_from_stats(session: dict, question: str):
     This handles simple patterns like 'sum of X', 'average of X', 'min X', 'max X',
     'how many X', 'count X', 'median of X'.
     """
-    q = question.lower()
+    q = question.strip()
     stats = session.get("metadata", {}).get("stats") or {}
     if not stats:
         return None
@@ -356,6 +359,106 @@ def try_answer_from_stats(session: dict, question: str):
     if "count" in q or "how many" in q or "number of" in q:
         if col_stats and "count" in col_stats:
             return f"Count (non-missing) of {col}: {col_stats['count']:,}"
+
+    # normalize and flatten column names
+    col_names = session.get("metadata", {}).get("column_names") or []
+    if isinstance(col_names, dict):
+        flat_cols = []
+        for v in col_names.values():
+            flat_cols.extend(v)
+        col_names = flat_cols
+
+    # helper: fuzzy match a candidate column name from question text
+    def find_best_column(text: str) -> Optional[str]:
+        lowered = [str(c) for c in col_names]
+        # direct substring match
+        for c in col_names:
+            if c and c.lower() in text.lower():
+                return c
+        # fuzzy match using difflib
+        candidates = difflib.get_close_matches(text, lowered, n=1, cutoff=0.7)
+        if candidates:
+            # find original-cased name
+            idx = lowered.index(candidates[0])
+            return col_names[idx]
+        # try token-wise matching: check each word in question against columns
+        words = re.findall(r"\w+", text.lower())
+        for w in words:
+            candidates = difflib.get_close_matches(w, lowered, n=1, cutoff=0.8)
+            if candidates:
+                idx = lowered.index(candidates[0])
+                return col_names[idx]
+        return None
+
+    # extract filter clause after 'where' or 'for' or 'in'
+    filter_clause = None
+    m = re.search(r"\bwhere\b(.+)$", q, flags=re.I)
+    if not m:
+        m = re.search(r"\bfor\b(.+)$", q, flags=re.I)
+    if not m:
+        m = re.search(r"\bin\b(\s+\d{4})", q, flags=re.I)
+    if m:
+        filter_clause = m.group(1).strip()
+
+    # detect intended aggregation
+    intent = None
+    if re.search(r"\bsum\b|\btotal\b|\badd up\b", q, flags=re.I):
+        intent = "sum"
+    elif re.search(r"\baverage\b|\bmean\b|\bavg\b", q, flags=re.I):
+        intent = "mean"
+    elif re.search(r"\bmedian\b", q, flags=re.I):
+        intent = "median"
+    elif re.search(r"\bmin\b|\bminimum\b|\blowest\b", q, flags=re.I):
+        intent = "min"
+    elif re.search(r"\bmax\b|\bmaximum\b|\bhighest\b", q, flags=re.I):
+        intent = "max"
+    elif re.search(r"\bhow many\b|\bcount\b|\bnumber of\b", q, flags=re.I):
+        intent = "count"
+
+    # try to find column by scanning for numeric-like intents with a nearby column name
+    col = find_best_column(q)
+    if not col:
+        return None
+
+    numeric = stats.get("numeric", {})
+    col_stats = numeric.get(col) if isinstance(numeric, dict) else None
+
+    # If no filter, and we have the stat, return it directly
+    if not filter_clause and col_stats:
+        if intent == "sum" and "sum" in col_stats:
+            return f"Sum of {col}: {col_stats['sum']:,}"
+        if intent == "mean" and "mean" in col_stats:
+            return f"Average of {col}: {col_stats['mean']:,}"
+        if intent == "median" and "median" in col_stats:
+            return f"Median of {col}: {col_stats['median']:,}"
+        if intent == "min" and "min" in col_stats:
+            return f"Min of {col}: {col_stats['min']:,}"
+        if intent == "max" and "max" in col_stats:
+            return f"Max of {col}: {col_stats['max']:,}"
+        if intent == "count" and "count" in col_stats:
+            return f"Count (non-missing) of {col}: {col_stats['count']:,}"
+
+    # If filter exists and is a simple equality on a categorical column, try to answer from categorical top counts
+    if filter_clause:
+        # parse simple filters like "Country = 'US'" or "country is US" or "country: US"
+        fm = re.search(r"([\w\s]+?)\s*(?:=|==|is|:|=\s?)\s*'?\"?([\w\-\s]+?)'?\"?$", filter_clause.strip(), flags=re.I)
+        if fm:
+            fcol_raw, fval_raw = fm.group(1).strip(), fm.group(2).strip()
+            fcol = find_best_column(fcol_raw)
+            fval = fval_raw
+            cat_stats = stats.get("categorical", {})
+            fcol_stats = cat_stats.get(fcol) if isinstance(cat_stats, dict) else None
+            if fcol_stats and fcol_stats.get("top"):
+                # search top list for matching value
+                for v, cnt in fcol_stats["top"]:
+                    if v.lower() == fval.lower() or difflib.get_close_matches(fval.lower(), [v.lower()], n=1, cutoff=0.8):
+                        # if user asked for count of rows where fcol == fval
+                        if intent in ("count", None) and ("count" in col_stats or intent is None):
+                            # if asking count of filtered rows, return count for category
+                            return f"Rows where {fcol} = {v}: {cnt:,} (from top-{len(fcol_stats['top'])} counts)"
+                # if asked for aggregation on another numeric column with filter, we cannot compute exact without full data
+                if intent in ("sum", "mean", "median", "min", "max"):
+                    return f"Cannot compute exact {intent} of {col} with filter '{filter_clause}' on server-side stats. Upload the full dataset or use the assistant to compute (may incur token cost)."
 
     return None
 

@@ -33,18 +33,47 @@ let isThinking = false;
 
 // ── Init ──────────────────────────────────────────────────────────────
 async function ensureApiBase() {
+  // 1. If backend injected via /config.js (window.AI_BACKEND_URL), prefer it
+  if (typeof window !== 'undefined' && window.AI_BACKEND_URL) {
+    const base = window.AI_BACKEND_URL.replace(/\/$/, '');
+    localStorage.setItem('AI_BACKEND_URL', base);
+    API = getApiBase();
+    return;
+  }
+
+  // 2. Try server endpoint on same origin (useful when frontend is served by backend)
   try {
     const res = await fetch('/api_base');
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.api_base) {
-      // Persist the backend URL for all clients so they connect automatically
-      localStorage.setItem("AI_BACKEND_URL", data.api_base.replace(/\/$/, ""));
-      API = getApiBase();
+    if (res.ok) {
+      const data = await res.json();
+      if (data.api_base) {
+        localStorage.setItem('AI_BACKEND_URL', data.api_base.replace(/\/$/, ''));
+        API = getApiBase();
+        return;
+      }
     }
   } catch (e) {
-    // ignore — frontend may be served from a different origin
+    // ignore — same-origin /api_base may not exist
   }
+
+  // 3. If we reach here, try the known DEFAULT_BACKEND directly and persist if reachable
+  try {
+    const probe = (url, timeout = 3000) => Promise.race([
+      fetch(url, { method: 'GET' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeout))
+    ]);
+    const statusRes = await probe(DEFAULT_BACKEND + '/status', 3000).catch(() => null);
+    if (statusRes && statusRes.ok) {
+      localStorage.setItem('AI_BACKEND_URL', DEFAULT_BACKEND.replace(/\/$/, ''));
+      API = getApiBase();
+      return;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // 4. Nothing reachable — leave API as-is (getApiBase will fallback to DEFAULT_BACKEND)
+  API = getApiBase();
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
