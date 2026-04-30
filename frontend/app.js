@@ -33,47 +33,67 @@ let isThinking = false;
 
 // ── Init ──────────────────────────────────────────────────────────────
 async function ensureApiBase() {
+  console.log('[ensureApiBase] Starting backend URL detection...');
+  console.log('[ensureApiBase] Current origin:', window.location.origin);
+  console.log('[ensureApiBase] DEFAULT_BACKEND:', DEFAULT_BACKEND);
+  
   // 1. If backend injected via /config.js (window.AI_BACKEND_URL), prefer it
   if (typeof window !== 'undefined' && window.AI_BACKEND_URL) {
     const base = window.AI_BACKEND_URL.replace(/\/$/, '');
+    console.log('[ensureApiBase] ✓ Found injected window.AI_BACKEND_URL:', base);
     localStorage.setItem('AI_BACKEND_URL', base);
     API = getApiBase();
+    console.log('[ensureApiBase] API set to:', API);
     return;
   }
+  console.log('[ensureApiBase] ✗ No injected window.AI_BACKEND_URL');
 
   // 2. Try server endpoint on same origin (useful when frontend is served by backend)
   try {
+    console.log('[ensureApiBase] Trying same-origin /api_base...');
     const res = await fetch('/api_base');
+    console.log('[ensureApiBase] /api_base response:', res.status);
     if (res.ok) {
       const data = await res.json();
+      console.log('[ensureApiBase] ✓ /api_base returned:', data);
       if (data.api_base) {
         localStorage.setItem('AI_BACKEND_URL', data.api_base.replace(/\/$/, ''));
         API = getApiBase();
+        console.log('[ensureApiBase] API set to:', API);
         return;
       }
     }
   } catch (e) {
-    // ignore — same-origin /api_base may not exist
+    console.log('[ensureApiBase] ✗ /api_base failed:', e.message);
   }
 
   // 3. If we reach here, try the known DEFAULT_BACKEND directly and persist if reachable
+  console.log('[ensureApiBase] Probing DEFAULT_BACKEND:', DEFAULT_BACKEND + '/status');
   try {
     const probe = (url, timeout = 3000) => Promise.race([
       fetch(url, { method: 'GET' }),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeout))
     ]);
-    const statusRes = await probe(DEFAULT_BACKEND + '/status', 3000).catch(() => null);
+    const statusRes = await probe(DEFAULT_BACKEND + '/status', 3000).catch(err => {
+      console.log('[ensureApiBase] Probe error:', err.message);
+      return null;
+    });
     if (statusRes && statusRes.ok) {
+      console.log('[ensureApiBase] ✓ DEFAULT_BACKEND reachable, status:', statusRes.status);
       localStorage.setItem('AI_BACKEND_URL', DEFAULT_BACKEND.replace(/\/$/, ''));
       API = getApiBase();
+      console.log('[ensureApiBase] API set to:', API);
       return;
+    } else {
+      console.log('[ensureApiBase] ✗ DEFAULT_BACKEND returned status:', statusRes?.status || 'null');
     }
   } catch (e) {
-    // ignore
+    console.log('[ensureApiBase] ✗ DEFAULT_BACKEND probe error:', e.message);
   }
 
   // 4. Nothing reachable — leave API as-is (getApiBase will fallback to DEFAULT_BACKEND)
   API = getApiBase();
+  console.log('[ensureApiBase] Final API:', API, '(fallback)');
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -145,6 +165,7 @@ async function api(method, path, body) {
 
 async function checkStatus() {
   try {
+    console.log('[checkStatus] Querying API:', API);
     const s = await api("GET", "/status");
     const dot = document.getElementById("provider-dot");
     const name = document.getElementById("provider-name");
@@ -153,16 +174,20 @@ async function checkStatus() {
       dot.className = "provider-dot";
       name.textContent = s.provider.toUpperCase();
       model.textContent = s.model === "default" ? "default model" : s.model;
+      console.log('[checkStatus] ✓ Backend connected:', s.provider, s.model);
     } else {
       dot.className = "provider-dot error";
       name.textContent = s.provider.toUpperCase() + " — No API Key";
       model.textContent = "Set key in backend/.env";
+      console.log('[checkStatus] ⚠ Backend connected but missing API key');
     }
-  } catch {
+  } catch (e) {
+    console.error('[checkStatus] ✗ Backend unreachable:', e.message);
     const dot = document.getElementById("provider-dot");
     dot.className = "provider-dot error";
     document.getElementById("provider-name").textContent = "Backend offline";
     document.getElementById("provider-model").textContent = "Start python app.py";
+    console.log('[checkStatus] Attempted API base:', API);
   }
 }
 
