@@ -68,13 +68,14 @@ async function ensureApiBase() {
   }
 
   // 3. If we reach here, try the known DEFAULT_BACKEND directly and persist if reachable
-  console.log('[ensureApiBase] Probing DEFAULT_BACKEND:', DEFAULT_BACKEND + '/status');
+  // (Render apps may take 10-30s to cold-start, so use a longer timeout)
+  console.log('[ensureApiBase] Probing DEFAULT_BACKEND:', DEFAULT_BACKEND + '/status', '(timeout: 15s for Render cold-start)');
   try {
-    const probe = (url, timeout = 3000) => Promise.race([
-      fetch(url, { method: 'GET' }),
+    const probe = (url, timeout = 15000) => Promise.race([
+      fetch(url, { method: 'GET', mode: 'cors' }),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeout))
     ]);
-    const statusRes = await probe(DEFAULT_BACKEND + '/status', 3000).catch(err => {
+    const statusRes = await probe(DEFAULT_BACKEND + '/status', 15000).catch(err => {
       console.log('[ensureApiBase] Probe error:', err.message);
       return null;
     });
