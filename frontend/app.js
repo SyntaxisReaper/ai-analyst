@@ -140,16 +140,17 @@ async function validateSessionsWithBackend() {
     sessions = valid;
     saveSessions();
     renderSessionList();
-    if (staleCount > 0) {
-      showToast(`Backend restarted — ${staleCount} old session(s) cleared. Please re-upload your file.`, "error");
-    }
+    showToast(`Backend restarted — ${staleCount} old session(s) cleared. Please re-upload your file.`, "error");
   }
 
   // Always ensure at least one session exists
   if (sessions.length === 0) {
+    // createSession() sets activeId internally via switchSession()
     await createSession();
   } else {
-    activeId = sessions[sessions.length - 1].id;
+    // Restore last active session — prefer previously active one if still valid
+    const lastValid = valid[valid.length - 1];
+    activeId = lastValid.id;
     renderSessionList();
     renderChatView();
   }
@@ -161,7 +162,15 @@ async function api(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(API + path, opts);
-  const json = await res.json();
+  let json;
+  try {
+    json = await res.json();
+  } catch (parseErr) {
+    // Backend returned non-JSON (HTML error page, proxy error, etc.)
+    const text = await res.text().catch(() => '');
+    console.error('[api] Non-JSON response from', method, path, '→', res.status, text.slice(0, 200));
+    throw new Error(`Server error (${res.status}): ${res.statusText || 'unexpected response'}`);
+  }
   // If the response has an error field, throw it immediately
   if (json.error) {
     console.error('[api]', method, path, '→ error:', json.error);
@@ -472,7 +481,9 @@ function appendBubble(role, content, scroll = true) {
 }
 
 function escapeAttr(s) {
-  return s.replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\n/g, "\\n");
+  // Safely coerce non-strings (objects, null, undefined) before escaping
+  const str = (typeof s === 'string') ? s : (s == null ? '' : JSON.stringify(s));
+  return str.replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\n/g, "\\n");
 }
 
 function copyMsg(btn) {

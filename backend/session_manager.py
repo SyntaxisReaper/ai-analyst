@@ -129,7 +129,7 @@ class SessionManager:
             if s:
                 s["history"] = []
                 if self._persist:
-                    self._save_session_db(sid)
+                    self._save_session_redis(sid)
 
     def delete(self, sid: str):
         with self._lock:

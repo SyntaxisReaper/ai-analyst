@@ -208,10 +208,16 @@ def ask():
         structured = None
         try:
             import json as _json
-            # Only try to parse if response starts with { or [
-            if answer.strip().startswith('{') or answer.strip().startswith('['):
+            # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+            stripped = answer.strip()
+            import re as _re
+            fence_match = _re.match(r'^```(?:json)?\s*([\s\S]+?)```$', stripped)
+            if fence_match:
+                stripped = fence_match.group(1).strip()
+            # Only try to parse if it looks like a JSON object
+            if stripped.startswith('{'):
                 try:
-                    parsed = _json.loads(answer.strip())
+                    parsed = _json.loads(stripped)
                     # basic validation
                     if isinstance(parsed, dict) and parsed.get("type") in ("answer", "command"):
                         structured = parsed
