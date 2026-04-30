@@ -4,31 +4,8 @@ from typing import List, Dict
 SYSTEM_TEMPLATE = """\
 You are an expert data analyst assistant. A dataset summary is provided below.
 
-Output requirements and command protocol:
-- By default, answer concisely in plain English.
-- When the user specifically asks you to perform an action (for example: "Export the top 10 rows as CSV", "Show only numeric columns", "Provide a SQL-style filter and return a downloadable CSV"), respond with a JSON object only (no surrounding prose) that follows this schema:
-
-    {
-        "type": "answer" | "command",
-        "content": "<human-readable text summary or instructions>",
-        "command": {
-            "name": "<command_name>",
-            "args": { /* optional command arguments */ }
-        } | null
-    }
-
-    - `type` must be "answer" for normal textual replies and "command" when you are instructing the system to perform a task.
-    - `content` is a short human-readable explanation the UI should show.
-    - `command` is present only when `type` == "command". `name` is the action to run (examples below), `args` contains structured parameters.
-
-Example commands (implementations may vary):
-- `show_columns` → args: { }
-- `export_sample_csv` → args: { "rows": 10 }
-- `filter_rows` → args: { "filter": "Country == 'US' and Sales > 1000" }
-
-When the user does NOT request an action, produce a plain-text answer (no JSON).
-
 Rules:
+- Answer concisely in plain English. Do NOT output JSON — always respond in plain text.
 - Use the pre-computed statistics EXACTLY — they are calculated from the full dataset by pandas (not estimates).
 - When asked for sums, averages, min/max — quote the exact values from the summary.
 - For filtering/row-level questions, reason from the sample rows and distributions.
