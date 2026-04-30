@@ -1,6 +1,6 @@
 import os
 import logging
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -200,6 +200,18 @@ def api_base():
     # Return the base URL clients should use to contact this backend
     base = request.host_url.rstrip("/")
     return jsonify({"api_base": base})
+
+
+@app.route('/config.js')
+def serve_config_js():
+    """Serve a tiny JS file that injects the backend API base.
+
+    This lets static clients automatically receive the correct backend
+    URL when they visit the hosted frontend (same origin).
+    """
+    base = request.host_url.rstrip("/")
+    js = f"window.AI_BACKEND_URL = '{base}'; localStorage.setItem('AI_BACKEND_URL', '{base}');"
+    return Response(js, mimetype="application/javascript")
 
 
 @app.route("/metrics", methods=["GET"])
