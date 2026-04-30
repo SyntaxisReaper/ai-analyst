@@ -311,8 +311,21 @@ function renderChatView() {
 
 // ── Upload ────────────────────────────────────────────────────────────
 async function uploadFile(file) {
-  const s = getActive();
-  if (!s) return showToast("Create a session first (＋ button)", "error");
+  let s = getActive();
+  // Auto-create session if none exists
+  if (!s) {
+    console.log('[uploadFile] No active session, creating one automatically...');
+    try {
+      const res = await api("POST", "/session/new");
+      const newSession = { id: res.session_id, name: null, meta: null, msgs: [] };
+      sessions.push(newSession);
+      saveSessions();
+      switchSession(res.session_id);
+      s = getActive();
+    } catch (err) {
+      return showToast("Failed to create session: " + err.message, "error");
+    }
+  }
 
   const bar = document.getElementById("uploading-bar");
   const zone = document.getElementById("upload-zone");
@@ -324,6 +337,7 @@ async function uploadFile(file) {
   fd.append("session_id", s.id);
 
   try {
+    console.log('[uploadFile] Uploading to session:', s.id, 'file:', file.name);
     const res = await fetch(`${API}/upload`, { method: "POST", body: fd });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -351,6 +365,8 @@ async function sendQuestion(question) {
   question = question.trim();
   if (!question) return;
 
+  console.log('[sendQuestion] Active session:', s.id, 'File:', s.name);
+
   isThinking = true;
   document.getElementById("send-btn").disabled = true;
   document.getElementById("question-input").value = "";
@@ -373,6 +389,7 @@ async function sendQuestion(question) {
   area.scrollTop = area.scrollHeight;
 
   try {
+    console.log('[sendQuestion] Sending /ask with session_id:', s.id, 'question:', question.substring(0, 50));
     const res = await api("POST", "/ask", { session_id: s.id, question });
     typing.remove();
 
