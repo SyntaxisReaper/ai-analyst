@@ -209,7 +209,10 @@ def serve_config_js():
     This lets static clients automatically receive the correct backend
     URL when they visit the hosted frontend (same origin).
     """
-    base = request.host_url.rstrip("/")
+    # Allow an environment override so the operator can force a fixed
+    # backend URL for all clients (useful when serving the frontend from
+    # other origins or behind a proxy). Set `AI_BACKEND_URL` in the env.
+    base = os.getenv("AI_BACKEND_URL") or request.host_url.rstrip("/")
     js = f"window.AI_BACKEND_URL = '{base}'; localStorage.setItem('AI_BACKEND_URL', '{base}');"
     return Response(js, mimetype="application/javascript")
 

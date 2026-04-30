@@ -37,6 +37,20 @@ SESSION_REDIS_URL=redis://localhost:6379/0
 
 If you don't want persistence, set `SESSION_PERSIST=false`. The frontend will automatically fetch the backend's base URL when served from the same host so clients connect without manual setup.
 
+### Forcing a single backend URL for all users
+
+If you want every client to always connect to the same backend (for example
+`https://ai-analyst-yhex.onrender.com`), set the `AI_BACKEND_URL` environment
+variable on the backend server before starting it:
+
+```env
+AI_BACKEND_URL=https://ai-analyst-yhex.onrender.com
+```
+
+When `AI_BACKEND_URL` is set, visiting the hosted frontend will automatically
+inject and persist that URL into each user's `localStorage`, so they won't
+need to manually enter or apply the backend URL.
+
 | Provider | Get API Key | Default Model |
 |---|---|---|
 | **Groq** (recommended) | [console.groq.com](https://console.groq.com) | llama3-8b-8192 |
