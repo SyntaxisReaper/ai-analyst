@@ -101,7 +101,13 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="/config.js"></script>
+<script>
+  // Attempt to load backend config if on same origin; ignore 404 if on different origin (e.g., Vercel)
+  var configScript = document.createElement('script');
+  configScript.src = '/config.js';
+  configScript.onerror = function() { console.log('[config.js] Not found on this origin (OK for external frontend)'); };
+  document.head.appendChild(configScript);
+</script>
 <script src="app.js"></script>
 
 <!-- Settings Modal -->

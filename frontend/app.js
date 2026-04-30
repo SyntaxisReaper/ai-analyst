@@ -411,7 +411,6 @@ function appendBubble(role, content, scroll = true) {
   msg.className = `message ${role}`;
 
   const avatar = `<div class="msg-avatar">${isUser ? "👤" : "🤖"}</div>`;
-  const isUser = role === "user";
 
   // support content objects or plain strings; if object, prefer its `content` prop
   let contentText = content;
