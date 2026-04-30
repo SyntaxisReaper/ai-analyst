@@ -161,7 +161,13 @@ async function api(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(API + path, opts);
-  return res.json();
+  const json = await res.json();
+  // If the response has an error field, throw it immediately
+  if (json.error) {
+    console.error('[api]', method, path, '→ error:', json.error);
+    throw new Error(json.error);
+  }
+  return json;
 }
 
 async function checkStatus() {
@@ -369,7 +375,6 @@ async function sendQuestion(question) {
   try {
     const res = await api("POST", "/ask", { session_id: s.id, question });
     typing.remove();
-    if (res.error) throw new Error(res.error);
 
     const assistantContent = (res.structured && res.structured.content) ? res.structured.content : res.answer;
     const command = (res.structured && res.structured.command) ? res.structured.command : null;
@@ -391,7 +396,14 @@ async function sendQuestion(question) {
     renderSessionList();
   } catch (err) {
     typing.remove();
-    appendBubble("assistant", "⚠️ **Error:** " + err.message);
+    // Show a user-friendly error message; avoid showing cryptic system errors
+    let errMsg = err.message || 'Unknown error';
+    // Clean up technical error messages
+    if (errMsg.includes('JSON') || errMsg.includes('undefined') || errMsg.includes('null')) {
+      errMsg = 'Backend error or invalid response. Please try again.';
+    }
+    appendBubble("assistant", "⚠️ **Error:** " + errMsg);
+    console.error('[sendQuestion] Error:', err);
   } finally {
     isThinking = false;
     document.getElementById("send-btn").disabled = false;

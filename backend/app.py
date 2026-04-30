@@ -208,11 +208,28 @@ def ask():
         structured = None
         try:
             import json as _json
-            parsed = _json.loads(answer)
+            # Try to extract JSON from the response; it may have surrounding text
+            # First, try parsing the whole response
+            try:
+                parsed = _json.loads(answer)
+            except Exception:
+                # If that fails, try to extract JSON from the response text
+                # Look for { ... } or [ ... ] patterns
+                import re
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', answer, re.DOTALL)
+                if json_match:
+                    parsed = _json.loads(json_match.group(0))
+                else:
+                    parsed = None
+            
             # basic validation
-            if isinstance(parsed, dict) and parsed.get("type") in ("answer", "command"):
+            if parsed and isinstance(parsed, dict) and parsed.get("type") in ("answer", "command"):
                 structured = parsed
-        except Exception:
+                print(f"[/ask] ✓ Parsed structured command: {parsed.get('type')}")
+            elif parsed:
+                print(f"[/ask] Response has JSON but not structured format: {parsed.keys() if isinstance(parsed, dict) else type(parsed)}")
+        except Exception as e:
+            print(f"[/ask] Could not parse JSON from response: {str(e)[:100]}")
             structured = None
         session_manager.add_message(sid, "user", question)
         session_manager.add_message(sid, "assistant", answer)
