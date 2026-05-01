@@ -375,7 +375,11 @@ function renderChatView() {
   area.querySelectorAll(".message").forEach(m => m.remove());
   area.querySelector(".typing-indicator")?.remove();
 
-  s.msgs.forEach(m => appendBubble(m.role, m.content, false));
+  s.msgs.forEach(m => appendBubble(m.role, m.content, false, {
+    confidence: m.confidence,
+    pandasResult: m.pandasResult,
+    intent: m.intent
+  }));
   area.scrollTop = area.scrollHeight;
 }
 
@@ -419,6 +423,12 @@ async function uploadFile(file) {
     renderSessionList();
     renderChatView();
     showToast(`✓ ${data.file_name} loaded (${data.metadata.rows?.toLocaleString()} rows)`, "success");
+    // P3.3 — auto-show employee panel if employee data detected
+    if (data.metadata.employee_stats && Object.keys(data.metadata.employee_stats).length > 0) {
+      renderEmployeePanel(data.metadata.employee_stats);
+    } else {
+      hideEmployeePanel();
+    }
   } catch (err) {
     // P1.3 — Auto-recover if the session expired while the page was open
     if (err.message && err.message.includes('Invalid or missing session_id')) {
@@ -490,9 +500,14 @@ async function sendQuestion(question) {
     const assistantContent = (res.structured && res.structured.content) ? res.structured.content : res.answer;
     const command = (res.structured && res.structured.command) ? res.structured.command : null;
 
-    s.msgs.push({ role: "assistant", content: assistantContent, command });
+    // P3.2 — confidence indicator
+    const confidence = res.confidence || (res.source === 'server' ? 'exact' : 'estimated');
+    const pandasResult = res.pandas_result || null;
+    const intent = res.intent || null;
+
+    s.msgs.push({ role: "assistant", content: assistantContent, command, confidence, pandasResult, intent });
     saveSessions();
-    const msgEl = appendBubble("assistant", assistantContent);
+    const msgEl = appendBubble("assistant", assistantContent, true, { confidence, pandasResult, intent });
     if (command) {
       // add a command action button to the assistant message
       const actionsWrap = document.createElement('div');
@@ -531,7 +546,7 @@ function sendSuggestion(btn) {
 }
 
 // ── Render a chat bubble ──────────────────────────────────────────────
-function appendBubble(role, content, scroll = true) {
+function appendBubble(role, content, scroll = true, meta = {}) {
   const area = document.getElementById("chat-area");
   const isUser = role === "user";
 
@@ -547,10 +562,33 @@ function appendBubble(role, content, scroll = true) {
   }
 
   const html = marked.parse(contentText);
+
+  // P3.2 — Confidence badge
+  let badgeHtml = '';
+  if (!isUser && meta.confidence) {
+    const isExact = meta.confidence === 'exact';
+    badgeHtml = `<span class="confidence-badge ${isExact ? 'exact' : 'estimated'}">${isExact ? '✅ Exact' : '🔶 Estimated'}</span>`;
+  }
+
+  // P3.1 — Show working toggle (only if pandas result available)
+  let workingHtml = '';
+  if (!isUser && meta.pandasResult) {
+    const escapedResult = escapeAttr(meta.pandasResult);
+    workingHtml = `
+      <div class="show-working-wrap">
+        <button class="show-working-btn" onclick="toggleWorking(this)">📊 Show calculation</button>
+        <pre class="working-detail" style="display:none">${meta.pandasResult.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
+      </div>`;
+  }
+
   const actions = isUser ? "" : `
-    <div class="msg-actions">
-      <button class="msg-action-btn" onclick="copyMsg(this)" data-text="${escapeAttr(content)}">📋 Copy</button>
-    </div>`;
+    <div class="msg-footer">
+      ${badgeHtml}
+      <div class="msg-actions">
+        <button class="msg-action-btn" onclick="copyMsg(this)" data-text="${escapeAttr(content)}">📋 Copy</button>
+      </div>
+    </div>
+    ${workingHtml}`;
 
   msg.innerHTML = `
     ${avatar}
@@ -567,6 +605,13 @@ function appendBubble(role, content, scroll = true) {
   area.appendChild(msg);
   if (scroll) area.scrollTop = area.scrollHeight;
   return msg;
+}
+
+function toggleWorking(btn) {
+  const detail = btn.nextElementSibling;
+  const showing = detail.style.display !== 'none';
+  detail.style.display = showing ? 'none' : 'block';
+  btn.textContent = showing ? '📊 Show calculation' : '📊 Hide calculation';
 }
 
 function escapeAttr(s) {
@@ -1012,4 +1057,77 @@ async function downloadFilteredCSV() {
     btn.disabled = false;
     btn.textContent = '⬇ Download CSV';
   }
+}
+
+// ── P3.3: Employee Progress Dashboard Card ────────────────────────────
+function renderEmployeePanel(employeeStats) {
+  // Remove any existing panel
+  document.getElementById('employee-panel')?.remove();
+
+  if (!employeeStats || Object.keys(employeeStats).length === 0) return;
+
+  // Sort by overall rank
+  const sorted = Object.entries(employeeStats).sort(
+    ([, a], [, b]) => (a.overall_rank || 999) - (b.overall_rank || 999)
+  );
+
+  const rankColors = ['#f7c948', '#c0c0c0', '#cd7f32', '#7c6ef7', '#5db8f5', '#6cf0b0'];
+
+  let rows = '';
+  sorted.forEach(([name, stats], idx) => {
+    const rank = stats.overall_rank || idx + 1;
+    const total = (stats.overall_total || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    const rankColor = rankColors[Math.min(rank - 1, rankColors.length - 1)];
+
+    // Collect per-sheet metrics (exclude meta fields)
+    const metrics = Object.entries(stats)
+      .filter(([k]) => !['overall_rank', 'overall_total'].includes(k))
+      .slice(0, 4)  // show up to 4 metrics
+      .map(([k, v]) => {
+        const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const val = typeof v === 'number' ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : v;
+        return `<div class="emp-metric"><span class="emp-metric-label">${label}</span><span class="emp-metric-val">${val}</span></div>`;
+      }).join('');
+
+    rows += `
+      <div class="emp-row">
+        <div class="emp-rank" style="color:${rankColor}">#${rank}</div>
+        <div class="emp-info">
+          <div class="emp-name">${name}</div>
+          <div class="emp-total">Total Score: ${total}</div>
+          <div class="emp-metrics">${metrics}</div>
+        </div>
+      </div>`;
+  });
+
+  const panel = document.createElement('div');
+  panel.id = 'employee-panel';
+  panel.className = 'employee-panel';
+  panel.innerHTML = `
+    <div class="employee-panel-header" onclick="toggleEmployeePanel(this)">
+      <span>👥 Employee Progress</span>
+      <span class="emp-count">${sorted.length} people</span>
+      <span class="emp-toggle-icon">▼</span>
+    </div>
+    <div class="employee-panel-body">
+      ${rows}
+    </div>`;
+
+  // Insert before the chat area in the right panel
+  const chatView = document.getElementById('chat-view');
+  if (chatView) {
+    chatView.insertBefore(panel, chatView.firstChild);
+  }
+}
+
+function hideEmployeePanel() {
+  document.getElementById('employee-panel')?.remove();
+}
+
+function toggleEmployeePanel(header) {
+  const body = header.nextElementSibling;
+  const icon = header.querySelector('.emp-toggle-icon');
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  icon.textContent = isOpen ? '▶' : '▼';
 }

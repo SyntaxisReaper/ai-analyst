@@ -82,6 +82,11 @@ class SessionManager:
                 "summary": None,
                 "metadata": {},
                 "history": [],
+                # P0.1 — full DataFrames per sheet (serialised JSON) for pandas compute
+                "sheets_data": {},
+                # P0.2 / P1.1 — pre-extracted fact dicts
+                "named_totals": {},
+                "employee_stats": {},
                 "created_at": now,
                 "last_used": now,
             }
@@ -109,6 +114,10 @@ class SessionManager:
                 s.update(data)
                 s["history"] = []
                 s["last_used"] = datetime.utcnow().isoformat()
+                # Ensure new fields are always present even if processor didn't set them
+                s.setdefault("sheets_data", {})
+                s.setdefault("named_totals", {})
+                s.setdefault("employee_stats", {})
                 if self._persist:
                     self._save_session_redis(sid)
 

@@ -1,5 +1,7 @@
 import os
+import io
 import re
+import json
 import hashlib
 import logging
 import difflib
@@ -12,7 +14,7 @@ from dotenv import load_dotenv
 
 from session_manager import SessionManager
 from data_processor import DataProcessor
-from ai_client import create_client, PROVIDER_MODELS
+from ai_client import create_client, PROVIDER_MODELS, classify_intent, verify_numerical_claims
 
 load_dotenv()
 
@@ -184,7 +186,13 @@ def upload():
             "file_name": f.filename,
             "summary": result["summary"],
             "metadata": result["metadata"],
-            "dataframe_json": result.get("dataframe_json"),  # P3.1
+            "dataframe_json": result.get("dataframe_json"),
+            # P0.1 — store full DataFrames per sheet for pandas compute
+            "sheets_data": result.get("sheets_data", {}),
+            # P0.2 — named totals ground-truth dict
+            "named_totals": result["metadata"].get("named_totals", {}),
+            # P1.1 — employee stats cross-sheet dict
+            "employee_stats": result["metadata"].get("employee_stats", {}),
         })
         log.info("Upload OK sid=%s file=%s rows=%s", sid, f.filename, result["metadata"].get("rows"))
         return jsonify({"success": True, "file_name": f.filename, "metadata": result["metadata"]})
@@ -255,56 +263,82 @@ def ask():
         return jsonify({"error": "Question cannot be empty"}), 400
 
     try:
-        # First: attempt to answer simple numeric/aggregation questions from pre-computed stats
+        # ── P0.3: Classify intent ─────────────────────────────────────────────
+        intent = classify_intent(question)
+        log.info("Intent=%s sid=%s q=%s", intent, sid, question[:60])
+
+        # ── P0.1: Try pandas compute first ───────────────────────────────────
+        pandas_result = None
         server_answer = None
+
         try:
             server_answer = try_answer_from_stats(s, question)
         except Exception:
             server_answer = None
 
+        # For numeric intents, try running actual pandas on stored DataFrames
+        if server_answer is None and intent in ("aggregation", "count", "average",
+                                                "comparison", "employee"):
+            try:
+                pandas_result = run_pandas_query(s, question, intent)
+            except Exception as exc:
+                log.warning("pandas compute failed: %s", exc)
+                pandas_result = None
+
         if server_answer is not None:
             session_manager.add_message(sid, "user", question)
             session_manager.add_message(sid, "assistant", server_answer)
-            return jsonify({"answer": server_answer, "source": "server"})
+            return jsonify({"answer": server_answer, "source": "server",
+                            "intent": intent, "confidence": "exact"})
 
-        # Fallback: call the AI client
+        # ── Fallback: call AI with optional pandas pre-computed result ────────
         client = get_client()
         answer = client.chat(
             summary=s["summary"],
             history=s["history"],
             question=question,
+            pandas_result=pandas_result,
         )
+
+        # ── P2.1: Verify numerical claims ─────────────────────────────────────
+        answer, had_conflicts = verify_numerical_claims(answer, s)
+
         # Try to parse structured JSON output (command protocol) from the assistant
         structured = None
         try:
             import json as _json
-            # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
             stripped = answer.strip()
             import re as _re
             fence_match = _re.match(r'^```(?:json)?\s*([\s\S]+?)```$', stripped)
             if fence_match:
                 stripped = fence_match.group(1).strip()
-            # Only try to parse if it looks like a JSON object
             if stripped.startswith('{'):
                 try:
                     parsed = _json.loads(stripped)
-                    # basic validation
                     if isinstance(parsed, dict) and parsed.get("type") in ("answer", "command"):
                         structured = parsed
-                        print(f"[/ask] ✓ Parsed structured command: {parsed.get('type')}")
+                        log.info("Parsed structured command: %s", parsed.get("type"))
                 except Exception as e:
-                    print(f"[/ask] JSON in response but not valid structure: {str(e)[:100]}")
-            else:
-                print(f"[/ask] Response is plain text (no JSON), treating as answer: {answer[:80]}...")
+                    log.debug("JSON in response but not valid structure: %s", str(e)[:100])
         except Exception as e:
-            print(f"[/ask] Error during JSON parsing: {str(e)[:100]}")
+            log.debug("Error during JSON parsing: %s", str(e)[:100])
+
         session_manager.add_message(sid, "user", question)
         session_manager.add_message(sid, "assistant", answer)
-        resp = {"answer": answer, "source": "model"}
+        resp = {
+            "answer": answer,
+            "source": "model",
+            "intent": intent,
+            "confidence": "estimated" if (pandas_result is None and not had_conflicts) else "exact",
+            "pandas_used": pandas_result is not None,
+        }
         if structured:
             resp["structured"] = structured
+        if pandas_result:
+            resp["pandas_result"] = pandas_result
         return jsonify(resp)
     except Exception as e:
+        log.exception("Ask failed sid=%s", sid)
         return jsonify({"error": str(e)}), 500
 
 
@@ -383,7 +417,127 @@ def serve_frontend(path):
     return send_from_directory(FRONTEND_DIR, "index.html")
 
 
+def run_pandas_query(session: dict, question: str, intent: str) -> Optional[str]:
+    """
+    P0.1 — Load stored DataFrames from session and run exact pandas operations
+    based on the classified intent. Returns a structured result string, or None.
+
+    This is the "pandas-first" path that gives the AI exact numbers to explain.
+    """
+    import pandas as pd
+
+    sheets_data = session.get("sheets_data") or {}
+    named_totals = session.get("named_totals") or {}
+    employee_stats = session.get("employee_stats") or {}
+    q_lower = question.lower()
+
+    # ── Employee questions: return pre-computed stats ────────────────────────
+    if intent == "employee" and employee_stats:
+        # Try to find a specific employee mentioned
+        matched_emp = None
+        for emp in employee_stats:
+            if emp.lower() in q_lower or any(
+                part.lower() in q_lower for part in emp.split()
+            ):
+                matched_emp = emp
+                break
+
+        if matched_emp:
+            stats = employee_stats[matched_emp]
+            lines = [f"Employee: {matched_emp}",
+                     f"Overall Rank: #{stats.get('overall_rank', '?')}",
+                     f"Overall Total Score: {stats.get('overall_total', 0):,.2f}"]
+            for k, v in stats.items():
+                if k in ("overall_rank", "overall_total"):
+                    continue
+                lines.append(f"  {k}: {v:,.2f}" if isinstance(v, float) else f"  {k}: {v}")
+            return "\n".join(lines)
+
+        # All employees overview
+        if any(kw in q_lower for kw in ("all employee", "each employee", "every employee",
+                                          "employees", "progress of", "rank")):
+            lines = ["All Employee Statistics (sorted by overall rank):"]
+            for emp, stats in sorted(employee_stats.items(),
+                                     key=lambda x: x[1].get("overall_rank", 999)):
+                rank = stats.get("overall_rank", "?")
+                total = stats.get("overall_total", 0)
+                lines.append(f"\n  #{rank} {emp} — Total Score: {total:,.2f}")
+                for k, v in stats.items():
+                    if k in ("overall_rank", "overall_total"):
+                        continue
+                    lines.append(f"    {k}: {v:,.2f}" if isinstance(v, float) else f"    {k}: {v}")
+            return "\n".join(lines)
+
+    # ── Named totals: return ground-truth pre-calculated values ─────────────
+    if named_totals:
+        for label, val in named_totals.items():
+            if label.lower() in q_lower or any(
+                part.lower() in q_lower for part in label.split() if len(part) > 3
+            ):
+                return f"{label}: {val:,.4f}" if isinstance(val, float) and val != int(val) \
+                    else f"{label}: {val:,.0f}"
+
+    if not sheets_data:
+        return None
+
+    # ── Load DataFrames and run pandas operations ────────────────────────────
+    # Helper: flatten column names from all sheets
+    all_col_names: List[str] = []
+    for sheet_name, df_json in sheets_data.items():
+        try:
+            df = pd.read_json(io.StringIO(df_json), orient="split")
+            all_col_names.extend(df.columns.tolist())
+        except Exception:
+            continue
+
+    # Find best matching column
+    def find_col(text: str) -> Optional[str]:
+        text_lower = text.lower()
+        for c in all_col_names:
+            if c.lower() in text_lower:
+                return c
+        # fuzzy
+        matches = difflib.get_close_matches(text_lower, [c.lower() for c in all_col_names], n=1, cutoff=0.7)
+        if matches:
+            return all_col_names[[c.lower() for c in all_col_names].index(matches[0])]
+        return None
+
+    target_col = find_col(q_lower)
+    if not target_col:
+        return None
+
+    results = []
+    for sheet_name, df_json in sheets_data.items():
+        try:
+            df = pd.read_json(io.StringIO(df_json), orient="split")
+            if target_col not in df.columns:
+                continue
+            series = pd.to_numeric(df[target_col], errors="coerce").dropna()
+            if len(series) == 0:
+                continue
+
+            if intent == "aggregation":
+                results.append(f"Sheet '{sheet_name}' — Sum of {target_col}: {series.sum():,.4f}")
+            elif intent == "average":
+                results.append(f"Sheet '{sheet_name}' — Average of {target_col}: {series.mean():,.4f}")
+            elif intent == "count":
+                results.append(f"Sheet '{sheet_name}' — Count of {target_col}: {len(series):,}")
+            elif intent == "comparison":
+                results.append(
+                    f"Sheet '{sheet_name}' — {target_col}: "
+                    f"Max={series.max():,.4f}, Min={series.min():,.4f}, "
+                    f"Mean={series.mean():,.4f}"
+                )
+            else:
+                results.append(f"Sheet '{sheet_name}' — {target_col}: Sum={series.sum():,.4f}, Mean={series.mean():,.4f}")
+        except Exception:
+            continue
+
+    return "\n".join(results) if results else None
+
+
 def try_answer_from_stats(session: dict, question: str):
+
     """Attempt to answer basic aggregation questions from stored stats.
 
     Returns a plain-text answer string when applicable, otherwise None.
