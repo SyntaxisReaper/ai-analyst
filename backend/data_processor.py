@@ -78,47 +78,65 @@ class DataProcessor:
                 pass
         return df
 
-    # ── P0.2: Named totals extractor ─────────────────────────────────────────
+    # ── Fix 1: Row classifier — separates raw data from pre-calculated totals ──
 
-    def _extract_named_totals(self, df: pd.DataFrame) -> Dict[str, Any]:
+    def classify_rows(
+        self, df: pd.DataFrame
+    ) -> tuple:  # (data_df, named_totals_dict)
         """
-        Scan every row for cells matching TOTAL_KEYWORDS in any text column.
-        If a matching label is found in the same row as a numeric value, record it.
-        Returns a dict like {"TOTAL POINTS": 31735, "EFFICIENCY": 0.383, ...}
+        Split a DataFrame into two parts:
+          1. data_rows  — raw item rows (NOT total/summary rows)
+          2. named_totals — dict of {label: value} for every total/summary row
+
+        This prevents double-counting: the AI receives raw items for lookups
+        and pre-calculated totals as ground truth — never both at once.
         """
-        totals: Dict[str, Any] = {}
+        TOTAL_KWS = [
+            'total', 'sum', 'grand total', 'subtotal',
+            'efficiency', 'manufactured', 'growth', 'work points',
+            'average', 'avg',
+        ]
+
+        named_totals: Dict[str, Any] = {}
+        data_row_indices = []
+
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         text_cols = df.select_dtypes(include=["object"]).columns.tolist()
 
-        for _, row in df.iterrows():
-            # Look for a text cell that matches keyword pattern
-            label = None
+        for idx, row in df.iterrows():
+            # Check first text cell (usually the label column)
+            row_label = ""
             for tc in text_cols:
                 val = str(row.get(tc, "")).strip()
-                if val and TOTAL_KEYWORDS.search(val):
-                    label = val
+                if val and val.lower() != "nan":
+                    row_label = val.lower()
                     break
 
-            if label is None:
-                continue
+            is_total_row = any(kw in row_label for kw in TOTAL_KWS)
 
-            # Collect numeric values from same row
-            nums = {}
-            for nc in num_cols:
-                v = row.get(nc)
-                if pd.notna(v):
-                    nums[str(nc).strip()] = float(v)
+            if is_total_row:
+                label = row_label.strip().upper() if row_label else f"ROW_{idx}"
+                numeric_vals = [
+                    float(row[nc]) for nc in num_cols
+                    if nc in row.index and pd.notna(row[nc])
+                ]
+                if len(numeric_vals) == 1:
+                    named_totals[label] = numeric_vals[0]
+                elif len(numeric_vals) > 1:
+                    # Pick the largest value as the primary total for this label
+                    named_totals[label] = max(numeric_vals)
+                # Do NOT add this row to data_rows
+            else:
+                data_row_indices.append(idx)
 
-            # If only one numeric → use label as key directly
-            if len(nums) == 1:
-                val = list(nums.values())[0]
-                totals[label.upper()] = val
-            elif len(nums) > 1:
-                # Multiple numerics — store each as LABEL:COLUMN
-                for nc_name, val in nums.items():
-                    key = f"{label.upper()} [{nc_name}]"
-                    totals[key] = val
+        data_df = df.loc[data_row_indices].reset_index(drop=True)
+        return data_df, named_totals
 
+    # ── Named totals extractor (thin wrapper used by CSV path) ───────────────
+
+    def _extract_named_totals(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Delegate to classify_rows and return only the totals dict."""
+        _, totals = self.classify_rows(df)
         return totals
 
     # ── P1.1: Employee stats engine ──────────────────────────────────────────
@@ -203,7 +221,7 @@ class DataProcessor:
     # ── Excel processing ──────────────────────────────────────────────────────
 
     def _process_excel(self, file_bytes: bytes, filename: str) -> Dict[str, Any]:
-        """Read all sheets, build summary, extract named totals + employee stats."""
+        """Read all sheets, classify rows, build summary, extract totals + employee stats."""
         raw_sheets: Dict[str, pd.DataFrame] = pd.read_excel(
             io.BytesIO(file_bytes), sheet_name=None
         )
@@ -227,48 +245,63 @@ class DataProcessor:
             df = self._clean(df)
             cleaned_sheets[sheet_name] = df
 
-        # ── Named totals (P0.2) ───────────────────────────────────────────
+        # ── Fix 1: Classify rows per sheet ───────────────────────────────
+        # data_sheets  → only raw item rows (no totals) — used for stats/samples
+        # all_named_totals → ground truth pre-calculated values
+        data_sheets: Dict[str, pd.DataFrame] = {}
         all_named_totals: Dict[str, Any] = {}
+
         for sheet_name, df in cleaned_sheets.items():
             if df.empty:
+                data_sheets[sheet_name] = df
                 continue
-            sheet_totals = self._extract_named_totals(df)
+            data_df, sheet_totals = self.classify_rows(df)
+            data_sheets[sheet_name] = data_df
             for k, v in sheet_totals.items():
-                all_named_totals[k] = v
+                # Keep the highest-value entry when there's a key collision
+                # (e.g. same label across sheets — take the sheet grand total)
+                if k not in all_named_totals or v > all_named_totals[k]:
+                    all_named_totals[k] = v
 
-        # ── Employee stats (P1.1 + P1.2) ─────────────────────────────────
-        employee_stats = self._extract_employee_stats(cleaned_sheets)
+        # ── Employee stats run on DATA rows only (Fix 1) ─────────────────
+        employee_stats = self._extract_employee_stats(data_sheets)
 
-        # ── Per-sheet summaries + numeric stats ──────────────────────────
+        # ── Per-sheet summaries + numeric stats (on DATA rows only) ──────
         all_summaries: List[str] = []
         all_columns: Dict[str, List[str]] = {}
         combined_numeric_stats: Dict[str, Any] = {}
         combined_categorical_stats: Dict[str, Any] = {}
         total_rows = 0
-        dataframe_json = None   # only for single-sheet / first sheet
+        dataframe_json = None
 
-        for sheet_name, df in cleaned_sheets.items():
-            if df.empty:
+        for sheet_name, data_df in data_sheets.items():
+            full_df = cleaned_sheets[sheet_name]   # for column list only
+            if full_df.empty:
                 all_summaries.append(f"=== SHEET: '{sheet_name}' === (empty, skipped)")
                 continue
-            total_rows += len(df)
-            all_columns[sheet_name] = df.columns.tolist()
 
-            sheet_stats = self._compute_stats(df)
+            total_rows += len(data_df)
+            all_columns[sheet_name] = full_df.columns.tolist()
+
+            # Stats computed on DATA rows — totals are excluded, preventing double-count
+            sheet_stats = self._compute_stats(data_df) if not data_df.empty else {}
             combined_numeric_stats[sheet_name] = sheet_stats.get("numeric", {})
             combined_categorical_stats[sheet_name] = sheet_stats.get("categorical", {})
 
-            # Build text summary for this sheet
+            # Build text summary: data rows + named totals clearly separated
+            sheet_named_totals = {
+                k: v for k, v in all_named_totals.items()
+            }  # include all totals in each sheet summary for full context
             sheet_summary = self._build_summary(
-                df, f"{filename} > Sheet: '{sheet_name}'",
-                named_totals=self._extract_named_totals(df),
+                data_df, f"{filename} > Sheet: '{sheet_name}'",
+                named_totals=sheet_named_totals,
             )
             all_summaries.append(sheet_summary)
 
-            # Store first sheet's DataFrame as JSON for /filter
-            if dataframe_json is None:
+            # Store first data sheet as JSON for /filter
+            if dataframe_json is None and not data_df.empty:
                 try:
-                    dataframe_json = df.head(50_000).to_json(
+                    dataframe_json = data_df.head(50_000).to_json(
                         orient="split", date_format="iso", default_handler=str
                     )
                 except Exception:
@@ -281,11 +314,11 @@ class DataProcessor:
             + sep.join(all_summaries)
         )
 
-        # Append named totals block to summary (P2.3)
+        # Named totals block — injected once at the top level
         if all_named_totals:
             combined_summary += "\n\n" + self._format_named_totals_block(all_named_totals)
 
-        # Append employee stats block to summary (P1.3)
+        # Employee stats block
         if employee_stats:
             combined_summary += "\n\n" + self._format_employee_stats_block(employee_stats)
 
@@ -309,10 +342,10 @@ class DataProcessor:
             "summary": combined_summary,
             "metadata": meta,
             "dataframe_json": dataframe_json,
-            # P0 — store raw DataFrames (serialised per sheet) for pandas compute
+            # Store data-only DataFrames per sheet for pandas compute
             "sheets_data": {
                 name: df.to_json(orient="split", date_format="iso", default_handler=str)
-                for name, df in cleaned_sheets.items()
+                for name, df in data_sheets.items()
                 if not df.empty
             },
         }
@@ -414,54 +447,67 @@ class DataProcessor:
         filename: str,
         named_totals: Optional[Dict[str, Any]] = None,
     ) -> str:
+        """
+        Build the AI context string for one sheet.
+
+        Structure (Fix 2):
+          [PRE-CALCULATED FACTS]   ← totals from total rows; AI must use these exactly
+          [RAW ITEM DATA]          ← individual rows only; AI uses for lookups, NOT summing
+        """
         lines = [
             f"=== DATASET: {filename} ===",
-            f"Shape: {len(df):,} rows × {len(df.columns)} columns",
+            f"Shape: {len(df):,} rows × {len(df.columns)} columns (total/summary rows excluded)",
             f"Columns: {', '.join(df.columns.tolist())}",
-            "",
         ]
 
-        num_cols = df.select_dtypes(include=[np.number]).columns
+        # ── Section 1: PRE-CALCULATED FACTS ──────────────────────────────
+        if named_totals:
+            lines.append("")
+            lines.append("[PRE-CALCULATED FACTS — USE THESE EXACTLY, NEVER RECALCULATE]")
+            lines.append("These values come directly from total/summary rows in the source file.")
+            lines.append("DO NOT add up individual values below to verify — they already include everything.")
+            for k, v in named_totals.items():
+                if isinstance(v, float) and v != int(v):
+                    lines.append(f"  {k}: {v:,.4f}")
+                else:
+                    lines.append(f"  {k}: {int(v):,}" if isinstance(v, (int, float)) else f"  {k}: {v}")
+
+        # ── Section 2: RAW ITEM DATA stats (no total rows) ────────────────
+        lines.append("")
+        lines.append("[RAW ITEM DATA — USE ONLY FOR LOOKUPS, NOT FOR SUMMING]")
+        lines.append("These are individual rows. They do NOT include total rows.")
+        lines.append("If you need a total, use [PRE-CALCULATED FACTS] above — never add these up.")
+
+        num_cols = df.select_dtypes(include=[np.number]).columns if not df.empty else []
         if len(num_cols):
-            lines.append("--- NUMERIC COLUMNS (Exact pre-computed statistics) ---")
+            lines.append("")
+            lines.append("  Per-column stats (from raw item rows only):")
             for col in num_cols:
-                s = df[col].dropna()
+                s = df[col].dropna() if not df.empty else pd.Series([], dtype=float)
                 if len(s) == 0:
                     continue
                 lines += [
-                    f"\n[{col}]",
-                    f"  Count: {len(s):,} | Missing: {df[col].isna().sum():,}",
-                    f"  Min: {s.min():,.4f} | Max: {s.max():,.4f}",
-                    f"  Mean: {s.mean():,.4f} | Median: {s.median():,.4f}",
-                    f"  Std: {s.std():,.4f} | Sum: {s.sum():,.4f}",
-                    f"  25th pct: {s.quantile(0.25):,.4f} | 75th pct: {s.quantile(0.75):,.4f}",
+                    f"  [{col}]",
+                    f"    Count: {len(s):,} | Min: {s.min():,.2f} | Max: {s.max():,.2f} | Mean: {s.mean():,.2f}",
                 ]
 
-        cat_cols = df.select_dtypes(include=["object", "category"]).columns
+        cat_cols = df.select_dtypes(include=["object", "category"]).columns if not df.empty else []
         if len(cat_cols):
-            lines.append("\n--- CATEGORICAL COLUMNS ---")
+            lines.append("")
+            lines.append("  Categorical columns:")
             for col in cat_cols:
                 top = df[col].value_counts().head(self.MAX_CAT_VALUES)
                 top_str = ", ".join([f'"{v}" ({c:,})' for v, c in top.items()])
-                lines += [
-                    f"\n[{col}]",
-                    f"  Unique: {df[col].nunique():,} | Missing: {df[col].isna().sum():,}",
-                    f"  Top values: {top_str}",
-                ]
+                lines.append(f"  [{col}]: {top_str}")
 
-        dt_cols = df.select_dtypes(include=["datetime64"]).columns
-        if len(dt_cols):
-            lines.append("\n--- DATETIME COLUMNS ---")
-            for col in dt_cols:
-                s = df[col].dropna()
-                lines += [
-                    f"\n[{col}]",
-                    f"  Range: {s.min()} → {s.max()}",
-                    f"  Count: {len(s):,} | Missing: {df[col].isna().sum():,}",
-                ]
+        lines.append("")
+        n_sample = min(self.MAX_SAMPLE_ROWS, len(df)) if not df.empty else 0
+        lines.append(f"  Sample rows (first {n_sample} of raw items — no total rows):")
+        if not df.empty:
+            lines.append(df.head(self.MAX_SAMPLE_ROWS).to_string(index=False))
+        else:
+            lines.append("  (no raw item rows found — all rows were pre-calculated totals)")
 
-        lines.append(f"\n--- SAMPLE ROWS (first {min(self.MAX_SAMPLE_ROWS, len(df))}) ---")
-        lines.append(df.head(self.MAX_SAMPLE_ROWS).to_string(index=False))
         return "\n".join(lines)
 
     # ── P2.3: Structured fact blocks injected into the AI context ────────────

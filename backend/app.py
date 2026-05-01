@@ -300,7 +300,9 @@ def ask():
             pandas_result=pandas_result,
         )
 
-        # ── P2.1: Verify numerical claims ─────────────────────────────────────
+        # ── Fix 3: Verify numbers against named totals — correct if wrong ──
+        answer = verify_numbers_in_answer(answer, s.get("named_totals") or {})
+        # Also run the broad numerical claims check from ai_client
         answer, had_conflicts = verify_numerical_claims(answer, s)
 
         # Try to parse structured JSON output (command protocol) from the assistant
@@ -534,6 +536,55 @@ def run_pandas_query(session: dict, question: str, intent: str) -> Optional[str]
             continue
 
     return "\n".join(results) if results else None
+
+
+def verify_numbers_in_answer(answer: str, named_totals: dict) -> str:
+    """
+    Fix 3 — Scan the AI answer for numbers. If any number contradicts a
+    known pre-calculated total, append a correction note.
+
+    Logic (exact as specified):
+      - Extract all numbers from the answer
+      - For each, check against every named_total
+      - If abs(num - correct) > 1 AND the relative diff < 50% (close-but-wrong)
+        → the AI likely miscalculated; append a correction
+    """
+    if not named_totals:
+        return answer
+
+    numbers_in_answer = re.findall(r'\b\d[\d,]*\.?\d*\b', answer)
+    corrections = []
+
+    for num_str in numbers_in_answer:
+        try:
+            num = float(num_str.replace(',', ''))
+        except ValueError:
+            continue
+
+        for label, correct_val in named_totals.items():
+            try:
+                correct_val = float(correct_val)
+            except (TypeError, ValueError):
+                continue
+            if correct_val == 0:
+                continue
+
+            abs_diff = abs(num - correct_val)
+            rel_diff = abs_diff / max(abs(correct_val), 1)
+
+            # Flag: meaningfully different (>1 unit) but in same ballpark (<50% off)
+            if abs_diff > 1 and rel_diff < 0.5:
+                corrections.append(
+                    f"⚠️ Correction: The correct **{label}** is "
+                    f"**{int(correct_val):,}** (pre-calculated in the sheet), "
+                    f"not {int(num):,}."
+                )
+                break  # one correction per number is enough
+
+    if corrections:
+        answer += "\n\n---\n" + "\n".join(corrections)
+
+    return answer
 
 
 def try_answer_from_stats(session: dict, question: str):
