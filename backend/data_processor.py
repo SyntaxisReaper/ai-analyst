@@ -159,6 +159,85 @@ class DataProcessor:
                 return col
         return None
 
+    # ── Item lookup index (Bug 1 fix) ───────────────────────────────────────
+
+    def _detect_item_column(self, df: pd.DataFrame) -> Optional[str]:
+        """
+        Detect the column that contains item/machine/product names.
+        Prefers columns whose values look like codes (e.g. '91_ANSH MACHINE E12').
+        """
+        ITEM_COL_KWS = re.compile(
+            r"\b(item|machine|product|part|code|description|desc|name|label|sr|no\.?)\b",
+            re.IGNORECASE,
+        )
+        # First: check column names
+        for col in df.columns:
+            if ITEM_COL_KWS.search(str(col)):
+                return col
+
+        # Second: look for a text column whose values contain underscore-separated codes
+        # e.g. "91_ANSH MACHINE E12" or "83_ANSH MACHINE A08"
+        text_cols = df.select_dtypes(include=["object"]).columns.tolist()
+        for col in text_cols:
+            sample = df[col].dropna().head(20)
+            code_like = sum(
+                1 for v in sample
+                if isinstance(v, str) and (
+                    "_" in v or                          # has underscore code prefix
+                    re.search(r'\b[A-Z]\d{1,3}\b', v)  # has alphanumeric code like E12
+                )
+            )
+            if code_like >= max(2, len(sample) * 0.3):
+                return col
+
+        # Third: fall back to the first non-numeric column
+        if text_cols:
+            return text_cols[0]
+        return None
+
+    def _build_item_lookup_index(
+        self, sheets: Dict[str, pd.DataFrame]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Build a complete key-value lookup of every named item and its metrics.
+        Uses 100% of data rows — never samples. Indexed by UPPERCASE item name
+        so lookups are case-insensitive.
+
+        Returns:
+            {
+              "91_ANSH MACHINE E12": {"PRODUCTION": 10.0, "POINTS/QTY": 30, ...},
+              "83_ANSH MACHINE A08": {"PRODUCTION": 56.0, ...},
+              ...
+            }
+        """
+        item_index: Dict[str, Dict[str, Any]] = {}
+
+        for sheet_name, df in sheets.items():
+            if df.empty:
+                continue
+            name_col = self._detect_item_column(df)
+            if name_col is None:
+                continue
+
+            for _, row in df.iterrows():
+                raw_name = str(row.get(name_col, "")).strip()
+                if not raw_name or raw_name.lower() in ("nan", "none", ""):
+                    continue
+
+                key = raw_name.upper()
+                # If same key appears in multiple sheets, merge metrics
+                if key not in item_index:
+                    item_index[key] = {"_sheet": sheet_name, "_name": raw_name}
+
+                for col in df.columns:
+                    if col == name_col:
+                        continue
+                    val = row.get(col)
+                    if pd.notna(val):
+                        item_index[key][str(col)] = val
+
+        return item_index
+
     def _extract_employee_stats(
         self, sheets: Dict[str, pd.DataFrame]
     ) -> Dict[str, Dict[str, Any]]:
@@ -263,6 +342,9 @@ class DataProcessor:
                 if k not in all_named_totals or v > all_named_totals[k]:
                     all_named_totals[k] = v
 
+        # ── Item lookup index (100% rows, no sampling) ────────────────────
+        item_index = self._build_item_lookup_index(data_sheets)
+
         # ── Employee stats run on DATA rows only (Fix 1) ─────────────────
         employee_stats = self._extract_employee_stats(data_sheets)
 
@@ -336,6 +418,7 @@ class DataProcessor:
             },
             "named_totals": all_named_totals,
             "employee_stats": employee_stats,
+            "item_index": item_index,
         }
 
         return {
@@ -348,6 +431,8 @@ class DataProcessor:
                 for name, df in data_sheets.items()
                 if not df.empty
             },
+            # Complete item lookup index (100% rows, no sampling)
+            "item_index": item_index,
         }
 
     def _detect_header_row(self, file_bytes: bytes, sheet_name: str):

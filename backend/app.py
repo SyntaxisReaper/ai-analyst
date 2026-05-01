@@ -193,6 +193,8 @@ def upload():
             "named_totals": result["metadata"].get("named_totals", {}),
             # P1.1 — employee stats cross-sheet dict
             "employee_stats": result["metadata"].get("employee_stats", {}),
+            # Bug 1 — complete item lookup index (100% rows, no sampling)
+            "item_index": result.get("item_index", {}),
         })
         log.info("Upload OK sid=%s file=%s rows=%s", sid, f.filename, result["metadata"].get("rows"))
         return jsonify({"success": True, "file_name": f.filename, "metadata": result["metadata"]})
@@ -263,6 +265,22 @@ def ask():
         return jsonify({"error": "Question cannot be empty"}), 400
 
     try:
+        # ── Bug 1: Direct item lookup — check before anything else ───────────
+        # If the question names a specific item, return the exact row.
+        # Zero AI involvement — zero hallucination possible.
+        direct_answer = resolve_item_query(question, s)
+        if direct_answer is not None:
+            session_manager.add_message(sid, "user", question)
+            session_manager.add_message(sid, "assistant", direct_answer)
+            log.info("Direct item lookup sid=%s item hit", sid)
+            return jsonify({
+                "answer": direct_answer,
+                "source": "exact_lookup",
+                "intent": "lookup",
+                "confidence": "exact",
+                "pandas_used": False,
+            })
+
         # ── P0.3: Classify intent ─────────────────────────────────────────────
         intent = classify_intent(question)
         log.info("Intent=%s sid=%s q=%s", intent, sid, question[:60])
@@ -301,7 +319,7 @@ def ask():
         )
 
         # ── Fix 3: Verify numbers against named totals — correct if wrong ──
-        answer = verify_numbers_in_answer(answer, s.get("named_totals") or {})
+        answer = verify_numbers_in_answer(answer, s)
         # Also run the broad numerical claims check from ai_client
         answer, had_conflicts = verify_numerical_claims(answer, s)
 
@@ -538,27 +556,88 @@ def run_pandas_query(session: dict, question: str, intent: str) -> Optional[str]
     return "\n".join(results) if results else None
 
 
-def verify_numbers_in_answer(answer: str, named_totals: dict) -> str:
+def resolve_item_query(question: str, session: dict) -> Optional[str]:
     """
-    Fix 3 — Scan the AI answer for numbers. If any number contradicts a
-    known pre-calculated total, append a correction note.
+    Bug 1 fix — if the question mentions a specific item name from the index,
+    return its exact metrics directly. Never involves the AI.
+    Lookup is case-insensitive and handles partial matches (longest match wins).
+    """
+    item_index: dict = session.get("item_index") or {}
+    if not item_index:
+        return None
 
-    Logic (exact as specified):
-      - Extract all numbers from the answer
-      - For each, check against every named_total
-      - If abs(num - correct) > 1 AND the relative diff < 50% (close-but-wrong)
-        → the AI likely miscalculated; append a correction
+    question_upper = question.upper()
+
+    # Collect all matching item names; pick the longest (most specific) match
+    matches = [
+        name for name in item_index
+        if name in question_upper
+    ]
+    if not matches:
+        return None
+
+    item_name = max(matches, key=len)  # longest match = most specific
+    metrics = item_index[item_name]
+
+    raw_name = metrics.get("_name", item_name)
+    sheet = metrics.get("_sheet", "")
+
+    lines = [f"**{raw_name}**" + (f" (Sheet: {sheet})" if sheet else "") + ":", ""]
+    for col, val in metrics.items():
+        if col.startswith("_"):  # skip internal meta fields
+            continue
+        if isinstance(val, float) and val == int(val):
+            lines.append(f"  - {col}: {int(val):,}")
+        elif isinstance(val, float):
+            lines.append(f"  - {col}: {val:,.4f}")
+        else:
+            lines.append(f"  - {col}: {val}")
+
+    lines.append("\n\u2705 Exact (direct row lookup — no AI computation)")
+    return "\n".join(lines)
+
+
+def verify_numbers_in_answer(answer: str, session: dict) -> str:
     """
+    Bug 2 fix — scan the AI answer for numbers that contradict known pre-calculated
+    totals. Before scanning, mask all item names and alphanumeric codes so digits
+    embedded in names like '91_ANSH MACHINE E12' never trigger false warnings.
+    """
+    named_totals = session.get("named_totals") or {} if isinstance(session, dict) else {}
+    item_index   = session.get("item_index")   or {} if isinstance(session, dict) else {}
+
     if not named_totals:
         return answer
 
-    numbers_in_answer = re.findall(r'\b\d[\d,]*\.?\d*\b', answer)
+    # ── Step 1: mask item names so their internal numbers are invisible ─────
+    masked = answer
+    for item_name in item_index:
+        # item_index keys are UPPERCASE; answer may be mixed case
+        import re as _re
+        masked = _re.sub(
+            _re.escape(item_name), "[ITEM_NAME]",
+            masked, flags=_re.IGNORECASE
+        )
+
+    # ── Step 2: mask alphanumeric codes like E12, A08, D18 ──────────────
+    masked = re.sub(r'\b[A-Z]\d{1,3}\b', '[CODE]', masked)
+
+    # ── Step 3: extract standalone numbers only ─────────────────────────
+    # Require the number NOT to be immediately preceded/followed by letters/underscores
+    numbers_in_answer = re.findall(
+        r'(?<![A-Za-z_])\b(\d[\d,]*)\b(?![A-Za-z_%])',
+        masked
+    )
+
     corrections = []
+    seen_labels: set = set()  # avoid duplicate corrections
 
     for num_str in numbers_in_answer:
         try:
             num = float(num_str.replace(',', ''))
         except ValueError:
+            continue
+        if num < 2:  # ignore 0 and 1 — too common as counts/booleans
             continue
 
         for label, correct_val in named_totals.items():
@@ -566,23 +645,23 @@ def verify_numbers_in_answer(answer: str, named_totals: dict) -> str:
                 correct_val = float(correct_val)
             except (TypeError, ValueError):
                 continue
-            if correct_val == 0:
+            if correct_val == 0 or label in seen_labels:
                 continue
 
             abs_diff = abs(num - correct_val)
             rel_diff = abs_diff / max(abs(correct_val), 1)
 
-            # Flag: meaningfully different (>1 unit) but in same ballpark (<50% off)
-            if abs_diff > 1 and rel_diff < 0.5:
+            # Flag: meaningfully different (>1 unit) but in same ballpark (<30% off)
+            if abs_diff > 1 and rel_diff < 0.30:
                 corrections.append(
-                    f"⚠️ Correction: The correct **{label}** is "
-                    f"**{int(correct_val):,}** (pre-calculated in the sheet), "
-                    f"not {int(num):,}."
+                    f"⚠️ **{label}** should be **{int(correct_val):,}** "
+                    f"(pre-calculated in the sheet)."
                 )
-                break  # one correction per number is enough
+                seen_labels.add(label)
+                break
 
     if corrections:
-        answer += "\n\n---\n" + "\n".join(corrections)
+        answer += "\n\n🔶 **Precision note:** " + " · ".join(corrections)
 
     return answer
 

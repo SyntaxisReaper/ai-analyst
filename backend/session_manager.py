@@ -87,6 +87,8 @@ class SessionManager:
                 # P0.2 / P1.1 — pre-extracted fact dicts
                 "named_totals": {},
                 "employee_stats": {},
+                # Bug 1 fix — complete item lookup index (no sampling)
+                "item_index": {},
                 "created_at": now,
                 "last_used": now,
             }
@@ -118,6 +120,7 @@ class SessionManager:
                 s.setdefault("sheets_data", {})
                 s.setdefault("named_totals", {})
                 s.setdefault("employee_stats", {})
+                s.setdefault("item_index", {})
                 if self._persist:
                     self._save_session_redis(sid)
 
