@@ -868,6 +868,11 @@ async function saveSettings() {
   const backendUrl = document.getElementById("setting-backend-url").value.trim().replace(/\/$/, "");
   const saveBtn    = document.getElementById("modal-save-btn");
 
+  // ── Step 1: Capture the user's chosen provider + model BEFORE anything resets them
+  const chosenProvider = document.getElementById("setting-provider").value;
+  const chosenModel    = document.getElementById("setting-model").value;
+  const validChoice    = chosenProvider && !chosenProvider.includes("—");
+
   // Save backend URL and refresh API variable first
   if (backendUrl) {
     localStorage.setItem("AI_BACKEND_URL", backendUrl);
@@ -879,34 +884,47 @@ async function saveSettings() {
   saveBtn.disabled = true;
   saveBtn.textContent = "Connecting...";
 
-  // If dropdowns have no real selection yet (backend wasn't reachable before),
-  // just fetch config to confirm connection and populate them
   try {
+    // ── Step 2: Re-fetch config to confirm connection (this may repopulate dropdowns)
     _settingsData = await api("GET", "/config");
+    // Repopulate — but immediately restore the user's selection below
     populateSettingsModal(_settingsData);
-    saveBtn.textContent = "Apply";
-    saveBtn.disabled = false;
 
-    // Now apply provider/model if user already selected them
-    const provider = document.getElementById("setting-provider").value;
-    const model    = document.getElementById("setting-model").value;
-    if (provider && !provider.includes("—")) {
-      const res = await api("POST", "/config", { provider, model });
+    // ── Step 3: Restore the user's original selection if it's a real choice
+    if (validChoice) {
+      const providerSel = document.getElementById("setting-provider");
+      const modelSel    = document.getElementById("setting-model");
+      providerSel.value = chosenProvider;
+      // Re-populate model list for the chosen provider, then restore model
+      updateModelOptions(chosenProvider, chosenModel, _settingsData);
+      modelSel.value = chosenModel;
+      // Re-check key status for the chosen provider (enables Save button)
+      updateKeyStatus(chosenProvider, _settingsData.configured_providers);
+    }
+
+    saveBtn.textContent = "Applying...";
+
+    // ── Step 4: POST the provider/model the user actually selected
+    if (validChoice) {
+      const res = await api("POST", "/config", { provider: chosenProvider, model: chosenModel });
       if (res.error) throw new Error(res.error);
       document.getElementById("provider-name").textContent = res.provider.toUpperCase();
       document.getElementById("provider-model").textContent = res.model;
       document.getElementById("provider-dot").className = "provider-dot";
+      showToast(`✓ Switched to ${res.provider.toUpperCase()} — ${res.model || "default model"}`, "success");
     }
 
+    saveBtn.textContent = "Apply";
+    saveBtn.disabled = false;
     checkStatus();
     closeSettings();
-    showToast(`Connected to ${API}`, "success");
   } catch (err) {
     showToast("Could not reach backend: " + err.message, "error");
     saveBtn.disabled = false;
     saveBtn.textContent = "Apply";
   }
 }
+
 
 
 // Wire up modal buttons (called after DOM ready via bindEvents)
