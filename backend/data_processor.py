@@ -14,7 +14,17 @@ TOTAL_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-# ── Keywords for employee name columns ──────────────────────────────────────
+# ── Task 2.1: Schema-first column keyword sets ───────────────────────────────
+# Use explicit sets for O(1) lookup and cardinality/dtype checks for correctness
+EMPLOYEE_KEYWORDS: set = {"name", "employee", "staff", "worker", "person",
+                           "operator", "technician", "agent", "rep", "associate"}
+NUMERIC_KEYWORDS: set  = {"amount", "qty", "quantity", "count", "total", "sum",
+                           "price", "cost", "revenue", "sales", "score", "points",
+                           "production", "output", "value", "rate", "percent", "pct"}
+DATE_KEYWORDS: set     = {"date", "time", "year", "month", "day", "period",
+                           "created", "updated", "timestamp", "when"}
+
+# Legacy compiled regex kept for backward compat in _detect_employee_column fallback
 EMPLOYEE_COL_KEYWORDS = re.compile(
     r"\b(employee|name|staff|worker|person|operator|technician|agent)\b",
     re.IGNORECASE,
@@ -139,15 +149,60 @@ class DataProcessor:
         _, totals = self.classify_rows(df)
         return totals
 
-    # ── P1.1: Employee stats engine ──────────────────────────────────────────
+    # ── Task 2.1: Schema-first column detectors ──────────────────────────────
+
+    @staticmethod
+    def _is_employee_col(col: str, series: pd.Series) -> bool:
+        """
+        Task 2.1 — Three-layer check: keyword hit + string dtype + cardinality.
+        A numeric column named 'staff_count' is NOT an employee column.
+        """
+        keyword_hit = any(k in col.lower() for k in EMPLOYEE_KEYWORDS)
+        is_string   = pd.api.types.is_string_dtype(series)
+        cardinality = series.nunique()
+        return keyword_hit and is_string and cardinality > 5
+
+    @staticmethod
+    def _is_numeric_col(col: str, series: pd.Series) -> bool:
+        """Task 2.1 — Keyword + actual numeric dtype."""
+        keyword_hit = any(k in col.lower() for k in NUMERIC_KEYWORDS)
+        is_num = pd.api.types.is_numeric_dtype(series)
+        return is_num or (keyword_hit and is_num)
+
+    @staticmethod
+    def _is_date_col(col: str, series: pd.Series) -> bool:
+        """Task 2.1 — Keyword + datetime dtype."""
+        keyword_hit = any(k in col.lower() for k in DATE_KEYWORDS)
+        is_dt = pd.api.types.is_datetime64_any_dtype(series)
+        return keyword_hit or is_dt
+
+    def get_schema(self, df: pd.DataFrame) -> Dict[str, str]:
+        """
+        Task 1.2 — Return {column_name: dtype_tag} for every column.
+        dtype_tag ∈ { "employee", "datetime", "numeric", "categorical" }
+        Used by extract_intent() so the classifier knows what columns exist.
+        """
+        schema: Dict[str, str] = {}
+        for col in df.columns:
+            s = df[col]
+            if self._is_employee_col(col, s):
+                schema[col] = "employee"
+            elif self._is_date_col(col, s):
+                schema[col] = "datetime"
+            elif pd.api.types.is_numeric_dtype(s):
+                schema[col] = "numeric"
+            else:
+                schema[col] = "categorical"
+        return schema
 
     def _detect_employee_column(self, df: pd.DataFrame) -> Optional[str]:
-        """Return the best-guess employee name column, or None."""
+        """Return the best-guess employee name column using schema-first logic."""
+        # Prefer the layered check first
         for col in df.columns:
-            if EMPLOYEE_COL_KEYWORDS.search(str(col)):
+            if self._is_employee_col(col, df[col]):
                 return col
-        # fallback: look for a string column whose values are predominantly
-        # Title-Case words (likely person names), e.g. "ROHIT PATOLIYA"
+        # Fallback: look for a string column whose values are predominantly
+        # ALL-CAPS multi-word strings (likely person names, e.g. "ROHIT PATOLIYA")
         text_cols = df.select_dtypes(include=["object"]).columns.tolist()
         for col in text_cols:
             sample = df[col].dropna().head(20)

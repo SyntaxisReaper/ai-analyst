@@ -12,3 +12,5 @@ google-genai
 numpy
 gunicorn
 redis>=4.5.0
+pydantic>=2.0
+pytest

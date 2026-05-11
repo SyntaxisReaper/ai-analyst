@@ -14,7 +14,10 @@ from dotenv import load_dotenv
 
 from session_manager import SessionManager
 from data_processor import DataProcessor
-from ai_client import create_client, PROVIDER_MODELS, classify_intent, verify_numerical_claims
+from ai_client import (
+    create_client, PROVIDER_MODELS, classify_intent,
+    extract_intent, CONFIDENCE_THRESHOLD, verify_numerical_claims,
+)
 
 load_dotenv()
 
@@ -182,6 +185,19 @@ def upload():
         # P4.1 — file hash caching: skip re-processing identical files
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         result = data_processor.process_cached(file_bytes, f.filename, file_hash)
+
+        # Task 1.2 — build dataset schema from the first non-empty data sheet
+        schema: dict = {}
+        sheets_data = result.get("sheets_data", {})
+        if sheets_data:
+            import pandas as pd
+            first_sheet_json = next(iter(sheets_data.values()))
+            try:
+                first_df = pd.read_json(io.StringIO(first_sheet_json), orient="split")
+                schema = data_processor.get_schema(first_df)
+            except Exception:
+                schema = {}
+
         session_manager.set_file(sid, {
             "file_name": f.filename,
             "summary": result["summary"],
@@ -195,8 +211,11 @@ def upload():
             "employee_stats": result["metadata"].get("employee_stats", {}),
             # Bug 1 — complete item lookup index (100% rows, no sampling)
             "item_index": result.get("item_index", {}),
+            # Task 1.2 — column schema for intent classification
+            "schema": schema,
         })
-        log.info("Upload OK sid=%s file=%s rows=%s", sid, f.filename, result["metadata"].get("rows"))
+        log.info("Upload OK sid=%s file=%s rows=%s schema_cols=%d",
+                 sid, f.filename, result["metadata"].get("rows"), len(schema))
         return jsonify({"success": True, "file_name": f.filename, "metadata": result["metadata"]})
     except Exception as e:
         log.exception("Upload failed sid=%s", sid)
@@ -281,9 +300,20 @@ def ask():
                 "pandas_used": False,
             })
 
-        # ── P0.3: Classify intent ─────────────────────────────────────────────
-        intent = classify_intent(question)
-        log.info("Intent=%s sid=%s q=%s", intent, sid, question[:60])
+        # ── P0.3 + Task 1.2: Classify intent with schema awareness ─────────────
+        schema = session_manager.get_schema(sid)
+        intent_obj = extract_intent(question, schema=schema)
+        intent = classify_intent(question, schema=schema)  # legacy string for routing
+        confidence = intent_obj.confidence
+
+        # Task 1.3 — log low-confidence cases
+        if confidence < CONFIDENCE_THRESHOLD:
+            log.warning(
+                "Low-confidence intent: op=%s conf=%.2f sid=%s q=%s",
+                intent_obj.op, confidence, sid, question[:80]
+            )
+        else:
+            log.info("Intent=%s conf=%.2f sid=%s q=%s", intent, confidence, sid, question[:60])
 
         # ── P0.1: Try pandas compute first ───────────────────────────────────
         pandas_result = None
@@ -316,6 +346,7 @@ def ask():
             history=s["history"],
             question=question,
             pandas_result=pandas_result,
+            intent=intent_obj,  # Task 1.3 — pass confidence for low-conf prompt
         )
 
         # ── Fix 3: Verify numbers against named totals — correct if wrong ──
@@ -345,6 +376,17 @@ def ask():
 
         session_manager.add_message(sid, "user", question)
         session_manager.add_message(sid, "assistant", answer)
+
+        # Task 3.2 — structured intent log line per response
+        log.info(json.dumps({
+            "event":      "intent_resolved",
+            "session_id": sid,
+            "query":      question[:120],
+            "intent":     intent_obj.model_dump(),
+            "confidence": confidence,
+            "path":       "pandas" if pandas_result is not None else "ai_fallback",
+        }))
+
         resp = {
             "answer": answer,
             "source": "model",

@@ -89,6 +89,8 @@ class SessionManager:
                 "employee_stats": {},
                 # Bug 1 fix — complete item lookup index (no sampling)
                 "item_index": {},
+                # Task 1.2 — dataset schema {col: dtype_tag} for intent classification
+                "schema": {},
                 "created_at": now,
                 "last_used": now,
             }
@@ -121,6 +123,7 @@ class SessionManager:
                 s.setdefault("named_totals", {})
                 s.setdefault("employee_stats", {})
                 s.setdefault("item_index", {})
+                s.setdefault("schema", {})  # Task 1.2
                 if self._persist:
                     self._save_session_redis(sid)
 
@@ -142,6 +145,12 @@ class SessionManager:
                 s["history"] = []
                 if self._persist:
                     self._save_session_redis(sid)
+
+    def get_schema(self, sid: str) -> dict:
+        """Task 1.2 — Return the stored dataset schema for a session."""
+        with self._lock:
+            s = self._sessions.get(sid)
+            return s.get("schema", {}) if s else {}
 
     def delete(self, sid: str):
         with self._lock:

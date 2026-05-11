@@ -2,66 +2,237 @@
 ai_client.py — AI provider abstraction with intent classification,
 pandas-first computation, and numerical verification.
 
-Priority legend (from plan):
-  P0.3 — classify_intent()
-  P1.3 — employee progress prompt section in system prompt
-  P2.1 — verify_numerical_claims()
-  P2.2 — confidence flagging in system prompt
-  P2.3 — structured COMPUTED FACTS block injected into prompt
+Refactor (Intent Classification Plan):
+  Task 1.1 — Two-stage intent classifier (keyword extractor + decision matrix)
+  Task 1.2 — Dataset schema injected into every intent extraction call
+  Task 1.3 — Low-confidence fallback path with explicit logging
+  Task 2.2 — Fault-tolerant JSON command parsing (Pydantic + aggressive markdown strip)
+  Task 2.3 — Improved system prompt with JSON compliance guidance
+  Task 3.2 — Structured intent logging per response
 """
 
 import re
+import json
 import logging
+from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Tuple
+
+from pydantic import BaseModel, ValidationError
 
 log = logging.getLogger("ai_client")
 
-# ── Intent patterns ───────────────────────────────────────────────────────────
-
-_AGGREGATION_PATTERNS = re.compile(
-    r"\b(sum|total|add up|how much|grand total|subtotal)\b", re.I
-)
-_COUNT_PATTERNS = re.compile(
-    r"\b(count|how many|number of|tally)\b", re.I
-)
-_AVERAGE_PATTERNS = re.compile(
-    r"\b(average|mean|avg|per capita)\b", re.I
-)
-_LOOKUP_PATTERNS = re.compile(
-    r"\b(find|who|which|where is|look up|show me|what is the .+? of)\b", re.I
-)
-_COMPARISON_PATTERNS = re.compile(
-    r"\b(highest|lowest|most|least|rank|top|bottom|best|worst|compare)\b", re.I
-)
-_TREND_PATTERNS = re.compile(
-    r"\b(trend|growth|change|over time|increase|decrease|progress|improvement)\b", re.I
-)
-_EMPLOYEE_PATTERNS = re.compile(
-    r"\b(employee|worker|staff|person|operator|performance|progress of|progress for|who is)\b", re.I
-)
+# ── Confidence threshold ───────────────────────────────────────────────────────
+CONFIDENCE_THRESHOLD = 0.55
 
 
-def classify_intent(question: str) -> str:
+# ── Intent result dataclass ───────────────────────────────────────────────────
+
+@dataclass
+class Intent:
+    op: str = "none"          # aggregate | count | average | rank | lookup | trend | employee | none
+    fn: Optional[str] = None  # sum | mean | top | bottom | min | max | median | None
+    col: Optional[str] = None # resolved column name from schema
+    filter: Optional[str] = None
+    confidence: float = 0.0
+
+    def model_dump(self) -> dict:
+        return asdict(self)
+
+
+# ── Operation token tiers (high → low priority) ───────────────────────────────
+# Tier 1: Numeric computation tokens — ALWAYS win (sum, avg, count, rank, min/max)
+# Tier 2: Entity/context tokens (employee, trend) — win only if Tier 1 had no match
+# Tier 3: Generic lookup tokens (who, find, show me) — lowest priority
+
+_NUMERIC_TOKENS: Dict[str, Tuple[str, Optional[str]]] = {
+    # aggregate — sum
+    "grand total":   ("aggregate", "sum"),
+    "subtotal":      ("aggregate", "sum"),
+    "add up":        ("aggregate", "sum"),
+    "how much":      ("aggregate", "sum"),
+    "per capita":    ("average",   "mean"),
+    "how many":      ("count",     None),
+    "number of":     ("count",     None),
+    "over time":     ("trend",     None),
+    "sum":           ("aggregate", "sum"),
+    "total":         ("aggregate", "sum"),
+    "average":       ("average",   "mean"),
+    "mean":          ("average",   "mean"),
+    "avg":           ("average",   "mean"),
+    "median":        ("average",   "median"),
+    "minimum":       ("aggregate", "min"),
+    "maximum":       ("aggregate", "max"),
+    "count":         ("count",     None),
+    "tally":         ("count",     None),
+    "top":           ("rank",      "top"),
+    "highest":       ("rank",      "top"),
+    "most":          ("rank",      "top"),
+    "best":          ("rank",      "top"),
+    "bottom":        ("rank",      "bottom"),
+    "lowest":        ("rank",      "bottom"),
+    "least":         ("rank",      "bottom"),
+    "worst":         ("rank",      "bottom"),
+    "rank":          ("rank",      None),
+    "compare":       ("rank",      None),
+    "min":           ("aggregate", "min"),
+    "max":           ("aggregate", "max"),
+}
+
+_ENTITY_TOKENS: Dict[str, Tuple[str, Optional[str]]] = {
+    "trend":         ("trend",     None),
+    "growth":        ("trend",     None),
+    "increase":      ("trend",     None),
+    "decrease":      ("trend",     None),
+    "progress":      ("trend",     None),
+    "changed":       ("trend",     None),
+    "change":        ("trend",     None),
+    "improvement":   ("trend",     None),
+    "employee":      ("employee",  None),
+    "worker":        ("employee",  None),
+    "staff":         ("employee",  None),
+    "operator":      ("employee",  None),
+    "performance":   ("employee",  None),
+    "who is":        ("employee",  None),
+}
+
+_LOW_PRIORITY_TOKENS: Dict[str, Tuple[str, Optional[str]]] = {
+    "find":          ("lookup",    None),
+    "show me":       ("lookup",    None),
+    "look up":       ("lookup",    None),
+    "where is":      ("lookup",    None),
+    "what is the":   ("lookup",    None),
+    "who":           ("lookup",    None),
+    "which":         ("lookup",    None),
+}
+
+# Build flat dict for backward compat
+_HIGH_PRIORITY_TOKENS = {**_NUMERIC_TOKENS, **_ENTITY_TOKENS}
+_OP_TOKENS: Dict[str, Tuple[str, Optional[str]]] = {**_HIGH_PRIORITY_TOKENS, **_LOW_PRIORITY_TOKENS}
+
+# Sort each tier by token length descending (multi-word first)
+_NUMERIC_SORTED = sorted(_NUMERIC_TOKENS.keys(),       key=len, reverse=True)
+_ENTITY_SORTED  = sorted(_ENTITY_TOKENS.keys(),        key=len, reverse=True)
+_LOW_SORTED     = sorted(_LOW_PRIORITY_TOKENS.keys(),  key=len, reverse=True)
+# Legacy alias used elsewhere
+_HIGH_SORTED = _NUMERIC_SORTED + _ENTITY_SORTED
+
+
+def _extract_operation(query_lower: str) -> Tuple[Optional[str], Optional[str], float]:
     """
-    P0.3 — Classify the question into one of these intent categories:
-      aggregation | count | average | lookup | comparison | trend | employee | explanation
+    Stage 1a — scan query for operation tokens in three tiers:
+      1. Numeric tier (sum/avg/count/rank/min/max) — highest priority.
+      2. Entity tier (employee, trend) — wins only if no numeric op found.
+      3. Lookup tier (who, find, show me) — last resort.
+    Returns (op, fn, op_confidence).
     """
-    q = question.lower()
-    if _EMPLOYEE_PATTERNS.search(q):
-        return "employee"
-    if _AGGREGATION_PATTERNS.search(q):
-        return "aggregation"
-    if _COUNT_PATTERNS.search(q):
-        return "count"
-    if _AVERAGE_PATTERNS.search(q):
-        return "average"
-    if _COMPARISON_PATTERNS.search(q):
-        return "comparison"
-    if _TREND_PATTERNS.search(q):
-        return "trend"
-    if _LOOKUP_PATTERNS.search(q):
-        return "lookup"
-    return "explanation"
+    def _match(token: str, text: str) -> bool:
+        pattern = r'\b' + re.escape(token) + r'\b'
+        return bool(re.search(pattern, text))
+
+    for token in _NUMERIC_SORTED:
+        if _match(token, query_lower):
+            return *_NUMERIC_TOKENS[token], 0.75
+
+    for token in _ENTITY_SORTED:
+        if _match(token, query_lower):
+            return *_ENTITY_TOKENS[token], 0.65
+
+    for token in _LOW_SORTED:
+        if _match(token, query_lower):
+            return *_LOW_PRIORITY_TOKENS[token], 0.45
+
+    return None, None, 0.0
+
+
+def _resolve_column(query_lower: str, schema: Dict[str, str]) -> Tuple[Optional[str], float]:
+    """
+    Stage 1b — resolve a column name from the dataset schema against the query.
+    Uses exact substring match first, then fuzzy token overlap.
+    Returns (column_name, col_confidence).
+    """
+    if not schema:
+        return None, 0.0
+
+    # Direct substring match
+    for col in schema:
+        if col.lower() in query_lower:
+            return col, 1.0
+
+    # Token overlap: how many words of the col name appear in the query
+    best_col, best_score = None, 0.0
+    for col in schema:
+        tokens = re.findall(r'\w+', col.lower())
+        if not tokens:
+            continue
+        hits = sum(1 for t in tokens if t in query_lower and len(t) > 2)
+        score = hits / len(tokens)
+        if score > best_score:
+            best_score = score
+            best_col = col
+
+    if best_score >= 0.5:
+        return best_col, best_score * 0.9  # slight discount for fuzzy
+    return None, 0.0
+
+
+def extract_intent(query: str, schema: Optional[Dict[str, str]] = None) -> Intent:
+    """
+    Task 1.1 / 1.2 — Two-stage intent extractor.
+
+    Stage 1: keyword extractor — pulls op tokens and entity tokens.
+    Stage 2: decision matrix — maps (op, col_type) to final intent.
+
+    Args:
+        query:  The user's question.
+        schema: dict of {column_name: dtype_tag} from the loaded dataset.
+                dtype_tag ∈ { "numeric", "categorical", "datetime", "employee" }
+    """
+    schema = schema or {}
+    q = query.lower().strip()
+
+    op, fn, op_conf = _extract_operation(q)
+    col, col_conf = _resolve_column(q, schema)
+
+    # If op detected, confidence is op_conf; if also col found, boost it
+    if op is None:
+        return Intent(op="none", fn=None, col=None, confidence=0.2)
+
+    # Boost confidence when column is resolved
+    if col:
+        confidence = min(1.0, op_conf + col_conf * 0.3)
+    else:
+        confidence = op_conf * 0.8   # lower confidence without column anchor
+
+    # Refine fn for rank when we have no explicit top/bottom keyword
+    if op == "rank" and fn is None:
+        if re.search(r'\btop\b|\bhighest\b|\bbest\b|\bmost\b', q):
+            fn = "top"
+        elif re.search(r'\bbottom\b|\blowest\b|\bworst\b|\bleast\b', q):
+            fn = "bottom"
+
+    return Intent(op=op, fn=fn, col=col, confidence=confidence)
+
+
+# ── Legacy string-based classifier (kept for backward compat in app.py) ───────
+
+def classify_intent(question: str, schema: Optional[Dict[str, str]] = None) -> str:
+    """
+    Public interface used by app.py — returns an intent string for routing.
+    Now backed by extract_intent() for consistent logic.
+    """
+    intent = extract_intent(question, schema=schema)
+    # Map new op names to the legacy strings app.py expects
+    mapping = {
+        "aggregate": "aggregation",
+        "average":   "average",
+        "count":     "count",
+        "rank":      "comparison",
+        "lookup":    "lookup",
+        "trend":     "trend",
+        "employee":  "employee",
+        "none":      "explanation",
+    }
+    return mapping.get(intent.op, "explanation")
 
 
 # ── Number extraction for verification ───────────────────────────────────────
@@ -82,7 +253,7 @@ def _extract_numbers(text: str) -> List[float]:
 
 def _build_known_values(session: dict) -> Dict[float, str]:
     """
-    P2.1 — Build a map of {value → label} from all pre-computed facts
+    Build a map of {value → label} from all pre-computed facts
     so we can cross-check any number the AI mentions.
     """
     known: Dict[float, str] = {}
@@ -101,7 +272,6 @@ def _build_known_values(session: dict) -> Dict[float, str]:
     if isinstance(numeric, dict):
         for sheet_or_col, sheet_stats in numeric.items():
             if isinstance(sheet_stats, dict):
-                # nested: {sheet: {col: {sum, mean,...}}}
                 for col, col_stats in sheet_stats.items():
                     if isinstance(col_stats, dict):
                         for stat_name, val in col_stats.items():
@@ -109,19 +279,13 @@ def _build_known_values(session: dict) -> Dict[float, str]:
                                 known[float(val)] = f"{sheet_or_col}/{col}/{stat_name}"
                             except (TypeError, ValueError):
                                 pass
-                    else:
-                        # flat: {col: {sum, ...}}
-                        try:
-                            known[float(sheet_stats[col])] = f"{sheet_or_col}/{col}"
-                        except (TypeError, ValueError):
-                            pass
 
     return known
 
 
 def verify_numerical_claims(answer: str, session: dict) -> Tuple[str, bool]:
     """
-    P2.1 — Extract numbers from the AI answer. For each number, check if it
+    Extract numbers from the AI answer. For each number, check if it
     conflicts with a known pre-computed value (> 1% tolerance). If conflicts
     exist, append a correction note.
 
@@ -141,14 +305,13 @@ def verify_numerical_claims(answer: str, session: dict) -> Tuple[str, bool]:
             if known_val == 0:
                 continue
             diff_pct = abs(val - known_val) / abs(known_val)
-            # Only flag if values are in same order of magnitude and conflict
             if diff_pct > 0.01 and 0.1 < (val / known_val) < 10:
                 conflicts.append((val, known_val, label))
-                break  # one conflict per number is enough
+                break
 
     if conflicts:
         notes = []
-        for wrong, right, label in conflicts[:3]:   # cap at 3 notes
+        for wrong, right, label in conflicts[:3]:
             notes.append(
                 f"  ⚠ {wrong:,.0f} may differ from pre-computed {label} = {right:,.0f}"
             )
@@ -163,8 +326,38 @@ def verify_numerical_claims(answer: str, session: dict) -> Tuple[str, bool]:
     return answer, False
 
 
+# ── Task 2.2 — Fault-tolerant JSON command parsing ────────────────────────────
+
+class Command(BaseModel):
+    op: str
+    col: Optional[str] = None
+    fn: Optional[str] = None
+    filter: Optional[str] = None
+
+
+def parse_command(llm_output: str) -> Optional[Command]:
+    """
+    Task 2.2 — Strip markdown fencing aggressively, then validate with Pydantic.
+    Returns Command on success, None (with warning log) on any failure.
+    Never drops the failure silently.
+    """
+    # Step 1: strip all markdown fencing
+    raw = re.sub(r'```(?:json)?\s*|\s*```', '', llm_output).strip()
+    # Step 2: find first JSON object
+    m = re.search(r'\{[\s\S]+\}', raw)
+    if not m:
+        log.warning("parse_command: no JSON object found in output.\nRaw: %s", raw[:200])
+        return None
+    try:
+        return Command.model_validate(json.loads(m.group()))
+    except (json.JSONDecodeError, ValidationError) as e:
+        log.warning("parse_command failed: %s\nRaw: %s", e, raw[:200])
+        return None
+
+
 # ── System prompt ─────────────────────────────────────────────────────────────
 
+# Task 2.3 — Added JSON compliance block with DO/DON'T example
 SYSTEM_TEMPLATE = """\
 You are an expert data analyst assistant. A dataset summary is provided below.
 
@@ -195,8 +388,25 @@ When asked about employee performance, progress, or rankings:
 - If your number comes from [PRE-CALCULATED FACTS] → add ✅ Exact
 - If you are estimating → add 🔶 Estimated
 
+{confidence_note}
+
 {summary}
 """
+
+_LOW_CONFIDENCE_NOTE = (
+    "\n⚠️  IMPORTANT: The intent of this question is uncertain. "
+    "Do NOT compute or cite any specific numbers. "
+    "Describe what you observe in the data only — never invent figures."
+)
+
+
+def build_system_prompt(summary: str, confidence: float = 1.0) -> str:
+    """
+    Task 1.3 — Inject a low-confidence note into the system prompt when
+    intent confidence is below the threshold.
+    """
+    note = _LOW_CONFIDENCE_NOTE if confidence < CONFIDENCE_THRESHOLD else ""
+    return SYSTEM_TEMPLATE.format(summary=summary, confidence_note=note).strip()
 
 
 # ── Provider implementations ──────────────────────────────────────────────────
@@ -213,11 +423,12 @@ class _OpenAICompatClient:
         self.model = model
 
     def chat(self, summary: str, history: List[Dict], question: str,
-             pandas_result: Optional[str] = None) -> str:
-        system = SYSTEM_TEMPLATE.format(summary=summary)
+             pandas_result: Optional[str] = None,
+             intent: Optional[Intent] = None) -> str:
+        confidence = intent.confidence if intent else 1.0
+        system = build_system_prompt(summary, confidence)
         messages = [{"role": "system", "content": system}]
         messages.extend(history[-20:])
-        # Prepend pandas result if available (P0.1)
         user_content = question
         if pandas_result:
             user_content = (
@@ -240,8 +451,10 @@ class _GeminiClient:
         self.model = model
 
     def chat(self, summary: str, history: List[Dict], question: str,
-             pandas_result: Optional[str] = None) -> str:
-        system = SYSTEM_TEMPLATE.format(summary=summary)
+             pandas_result: Optional[str] = None,
+             intent: Optional[Intent] = None) -> str:
+        confidence = intent.confidence if intent else 1.0
+        system = build_system_prompt(summary, confidence)
         contents = []
         for m in history[-20:]:
             role = "user" if m["role"] == "user" else "model"
